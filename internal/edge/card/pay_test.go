@@ -67,7 +67,7 @@ func TestDoNoRedirect(t *testing.T) {
 	}))
 	defer upstream.Close()
 	res, err := Do(context.Background(), staticProvider{rt: http.DefaultTransport},
-		PayRequest{Method: "GET", URL: upstream.URL})
+		PayRequest{Method: "GET", URL: upstream.URL}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestDoTruncatedDropsContentLength(t *testing.T) {
 	}))
 	defer upstream.Close()
 	res, err := Do(context.Background(), staticProvider{rt: http.DefaultTransport},
-		PayRequest{Method: "GET", URL: upstream.URL})
+		PayRequest{Method: "GET", URL: upstream.URL}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestVGSLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := Do(context.Background(), staticProvider{rt: tr},
-		PayRequest{Method: "GET", URL: "https://echo.apps.verygood.systems/get"})
+		PayRequest{Method: "GET", URL: "https://echo.apps.verygood.systems/get"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,4 +121,62 @@ func TestVGSLive(t *testing.T) {
 		t.Fatalf("live status %d", res.Status)
 	}
 	fmt.Println("VGS live smoke status:", res.Status)
+}
+
+func TestRedact(t *testing.T) {
+	fields := map[string]string{"number": "tok_alias_pan", "cvc": "tok_cvc9", "exp_month": "12"}
+	body := `{"pan":"tok_alias_pan","raw":"4111 1111 1111 1111","cvv":"123","other":42,"exp":"12"}`
+	got := redact(body, fields)
+	if strings.Contains(got, "tok_alias_pan") || strings.Contains(got, "4111 1111 1111 1111") || strings.Contains(got, `"cvv":"123"`) {
+		t.Fatalf("redaction failed: %s", got)
+	}
+	if !strings.Contains(got, "[redacted]") || !strings.Contains(got, "****1111") || !strings.Contains(got, `"***"`) {
+		t.Fatalf("bad redacted form: %s", got)
+	}
+	// Non-Luhn digit runs and short values survive.
+	if got := redact(`{"n":"1234567890123456789","exp":"12"}`, fields); !strings.Contains(got, "1234567890123456789") {
+		t.Fatalf("non-PAN mangled: %s", got)
+	}
+}
+
+func TestDoStripsHopHeaders(t *testing.T) {
+	saw := map[string]string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k := range r.Header {
+			saw[strings.ToLower(k)] = k
+		}
+	}))
+	defer upstream.Close()
+	_, err := Do(context.Background(), staticProvider{rt: http.DefaultTransport},
+		PayRequest{Method: "GET", URL: upstream.URL, Headers: map[string]string{
+			"Proxy-Authorization": "Basic x", "Connection": "X-Smuggle", "X-Smuggle": "1",
+			"Upgrade": "h2c", "X-Keep": "1",
+		}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"proxy-authorization", "x-smuggle", "upgrade", "connection"} {
+		if _, ok := saw[bad]; ok {
+			t.Fatalf("hop header forwarded: %s", bad)
+		}
+	}
+	if _, ok := saw["x-keep"]; !ok {
+		t.Fatal("ordinary header missing")
+	}
+}
+
+func TestDoRedactsResponse(t *testing.T) {
+	fields := map[string]string{"number": "tok_live_pan"}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"echo":"tok_live_pan","card":"4111111111111111"}`)
+	}))
+	defer upstream.Close()
+	res, err := Do(context.Background(), staticProvider{rt: http.DefaultTransport},
+		PayRequest{Method: "GET", URL: upstream.URL}, fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Body, "tok_live_pan") || strings.Contains(res.Body, "4111111111111111") {
+		t.Fatalf("response not redacted: %s", res.Body)
+	}
 }

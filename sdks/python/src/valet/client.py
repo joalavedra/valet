@@ -133,7 +133,12 @@ class ValetClient:
 
         `body` may contain {{card.number}} {{card.exp_month}} {{card.exp_year}}
         {{card.cvc}} {{card.holder}} placeholders — Valet substitutes the
-        stored aliases before forwarding. Returns http_status + filtered body.
+        stored aliases before forwarding. Returns ``status``
+        (``ok``/``declined``/``upstream_error``), ``http_status`` and a
+        redacted body. A missing CVC returns HTTP 409 ``need_cvc`` (human
+        step-up). Card grants must be scoped — the grant policy needs
+        ``hosts`` or ``spend.merchants``, and a ``spend`` policy requires a
+        positive ``amount``.
         """
         payload: dict[str, Any] = {
             "grant_token": grant_token, "url": url, "method": method,

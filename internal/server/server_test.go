@@ -394,7 +394,7 @@ func TestCardPaySuccess(t *testing.T) {
 		Body       string `json:"body"`
 	}
 	json.NewDecoder(rec.Body).Decode(&out)
-	if out.Status != "sent" || out.HTTPStatus != 200 || !strings.Contains(out.Body, "charged") {
+	if out.Status != "ok" || out.HTTPStatus != 200 || !strings.Contains(out.Body, "charged") {
 		t.Fatalf("bad response: %v", out)
 	}
 }
@@ -657,4 +657,87 @@ func TestFillPageResolveError(t *testing.T) {
 	if err != nil || len(audits) == 0 || !strings.Contains(audits[len(audits)-1].Detail, "page_not_found") {
 		t.Fatalf("audit: %v %v", audits, err)
 	}
+}
+
+func TestCardPayCVCRequired(t *testing.T) {
+	srv, st, tok := testServer(t)
+	cardCred(t, srv, st) // no cvc field stored
+	srv.SetCardProvider(&fakeProvider{})
+	gtok := issueGrantHandle(t, srv, st, tok, "card://visa-4242", `{"spend":{"merchants":["*"]}}`, time.Hour)
+	rec, req := payReq(t, tok, map[string]any{
+		"grant_token": gtok, "url": "https://shop.com/charge", "amount": 50, "currency": "USD",
+		"body": `{"cvc":"{{card.cvc}}"}`,
+	})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "need_cvc") {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	// Grant must not be consumed by the fill failure.
+	if _, err := srv.issuer.Verify(gtok, agentID(t, st, tok)); err != nil {
+		t.Fatalf("grant should still verify: %v", err)
+	}
+	audits, _ := st.ListAudit(10)
+	if !strings.Contains(audits[len(audits)-1].Detail, "cvc_required") {
+		t.Fatalf("audit: %v", audits[len(audits)-1].Detail)
+	}
+}
+
+func TestCardPayAmountRequired(t *testing.T) {
+	srv, st, tok := testServer(t)
+	cardCred(t, srv, st)
+	srv.SetCardProvider(&fakeProvider{})
+	gtok := issueGrantHandle(t, srv, st, tok, "card://visa-4242", `{"spend":{"per_tx":100,"merchants":["*"]}}`, time.Hour)
+	rec, req := payReq(t, tok, map[string]any{
+		"grant_token": gtok, "url": "https://shop.com/charge", "amount": 0, "currency": "USD",
+	})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "amount required") {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCardPayUnscopedGrant(t *testing.T) {
+	srv, st, tok := testServer(t)
+	cardCred(t, srv, st)
+	srv.SetCardProvider(&fakeProvider{})
+	gtok := issueGrantHandle(t, srv, st, tok, "card://visa-4242", `{}`, time.Hour)
+	rec, req := payReq(t, tok, map[string]any{
+		"grant_token": gtok, "url": "https://shop.com/charge", "amount": 50, "currency": "USD",
+	})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "restrict merchants") {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCardPayStatusMapping(t *testing.T) {
+	srv, st, tok := testServer(t)
+	cardCred(t, srv, st)
+	code := 402
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(code)
+	}))
+	defer upstream.Close()
+	srv.SetCardProvider(&fakeProvider{upstream: upstream})
+	gtok := issueGrantHandle(t, srv, st, tok, "card://visa-4242", `{"spend":{"merchants":["*"]}}`, time.Hour)
+	rec, req := payReq(t, tok, map[string]any{
+		"grant_token": gtok, "url": upstream.URL, "amount": 50, "currency": "USD",
+	})
+	srv.ServeHTTP(rec, req)
+	var out struct {
+		Status string `json:"status"`
+	}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if rec.Code != 200 || out.Status != "declined" {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func agentID(t *testing.T, st *store.SQLite, tok string) int64 {
+	t.Helper()
+	a, err := st.GetAgentByTokenHash(hashToken(tok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a.ID
 }

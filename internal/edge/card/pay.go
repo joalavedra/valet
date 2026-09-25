@@ -31,6 +31,10 @@ const maxPayBody = 256 << 10
 
 var placeholderRE = regexp.MustCompile(`\{\{\s*card\.([a-z_]+)\s*\}\}`)
 
+// ErrCVCRequired is returned by Fill when a request references {{card.cvc}}
+// but no CVC alias is stored — the merchant needs a human step-up.
+var ErrCVCRequired = fmt.Errorf("cvc required (step-up)")
+
 var cardFields = map[string]bool{
 	"number": true, "exp_month": true, "exp_year": true, "holder": true, "cvc": true,
 }
@@ -48,9 +52,12 @@ func Fill(req PayRequest, fields map[string]string) (PayRequest, error) {
 				return m
 			}
 			v := fields[name]
+			if v == "" && name == "number" {
+				v = fields["alias"] // legacy entries stored the PAN under "alias"
+			}
 			if v == "" {
 				if name == "cvc" {
-					e = fmt.Errorf("cvc required (step-up)")
+					e = ErrCVCRequired
 				} else {
 					e = fmt.Errorf("card field %q missing", name)
 				}
@@ -79,10 +86,62 @@ var payRespHeaders = map[string]bool{
 	"x-request-id": true, "retry-after": true,
 }
 
+var payHopHeaders = map[string]bool{
+	"connection": true, "keep-alive": true, "proxy-authenticate": true,
+	"proxy-authorization": true, "proxy-connection": true, "te": true,
+	"trailer": true, "transfer-encoding": true, "upgrade": true, "host": true,
+}
+
+var panRE = regexp.MustCompile(`\d[\d -]{11,30}\d`)
+var cvcKeyRE = regexp.MustCompile(`"(?i:cv[cv]|security_code|csc)"\s*:\s*"?(\d{3,4})"?`)
+
+func luhnOK(digits string) bool {
+	sum := 0
+	alt := false
+	for i := len(digits) - 1; i >= 0; i-- {
+		d := int(digits[i] - '0')
+		if alt {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		alt = !alt
+	}
+	return sum%10 == 0
+}
+
+// redact scrubs leaked card material out of a response body: stored field
+// values, Luhn-valid PANs (with optional separators), and values under
+// cvc-like JSON keys.
+func redact(body string, fields map[string]string) string {
+	for _, v := range fields {
+		if len(v) >= 4 {
+			body = strings.ReplaceAll(body, v, "[redacted]")
+		}
+	}
+	body = panRE.ReplaceAllStringFunc(body, func(m string) string {
+		digits := strings.Map(func(r rune) rune {
+			if r >= '0' && r <= '9' {
+				return r
+			}
+			return -1
+		}, m)
+		if len(digits) < 13 || len(digits) > 19 || !luhnOK(digits) {
+			return m
+		}
+		return "****" + digits[len(digits)-4:]
+	})
+	body = cvcKeyRE.ReplaceAllString(body, `"***"`)
+	return body
+}
+
 // Do sends req via p.Transport(). Redirects are never followed (they could
-// leave the evaluated merchant host); the response body is capped at 256KiB.
+// leave the evaluated merchant host); the response body is capped at 256KiB
+// and redacted of any card material that leaks back.
 // Errors never include the request or response body.
-func Do(ctx context.Context, p Provider, req PayRequest) (*Response, error) {
+func Do(ctx context.Context, p Provider, req PayRequest, fields map[string]string) (*Response, error) {
 	tr, err := p.Transport()
 	if err != nil {
 		return nil, err
@@ -99,7 +158,19 @@ func Do(ctx context.Context, p Provider, req PayRequest) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Hop-by-hop and proxy-scoped headers (including any named by the
+	// agent's Connection header) never reach the proxy.
+	connNames := map[string]bool{}
+	for _, tok := range strings.Split(req.Headers["Connection"]+","+req.Headers["connection"], ",") {
+		if t := strings.ToLower(strings.TrimSpace(tok)); t != "" {
+			connNames[t] = true
+		}
+	}
 	for k, v := range req.Headers {
+		lk := strings.ToLower(k)
+		if payHopHeaders[lk] || connNames[lk] || strings.HasPrefix(lk, "proxy-") {
+			continue
+		}
 		hreq.Header.Set(k, v)
 	}
 	hc := &http.Client{
@@ -118,9 +189,9 @@ func Do(ctx context.Context, p Provider, req PayRequest) (*Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pay read failed")
 	}
-	out := &Response{Status: resp.StatusCode, Headers: map[string]string{}, Body: string(raw)}
+	out := &Response{Status: resp.StatusCode, Headers: map[string]string{}, Body: redact(string(raw), fields)}
 	if len(raw) > maxPayBody {
-		out.Body = string(raw[:maxPayBody])
+		out.Body = redact(string(raw[:maxPayBody]), fields)
 		out.Truncated = true
 	}
 	for k, vv := range resp.Header {

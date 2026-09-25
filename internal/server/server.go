@@ -436,6 +436,18 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant_invalid"})
 		return
 	}
+	// Card grants must be scoped to merchants; a spend policy without an
+	// amount can't be evaluated.
+	if len(p.Hosts) == 0 && (p.Spend == nil || len(p.Spend.Merchants) == 0) {
+		s.auditDeny(a.ID, g.Handle, "card", merchant, "unscoped_card_grant")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "card grant must restrict merchants"})
+		return
+	}
+	if p.Spend != nil && req.Amount <= 0 {
+		s.auditDeny(a.ID, g.Handle, "card", merchant, "amount_required")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "amount required"})
+		return
+	}
 	d := policy.Evaluate(&p, &policy.GrantView{ExpiresAt: g.ExpiresAt, Uses: g.Uses, MaxUses: g.MaxUses}, policy.Request{
 		Host: merchant, Merchant: merchant, Path: u.Path, Method: req.Method,
 		Amount: req.Amount, Currency: req.Currency, Now: time.Now(),
@@ -443,11 +455,6 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 	if !d.Allow {
 		s.auditDeny(a.ID, g.Handle, "card", merchant, d.Reason)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": d.Reason})
-		return
-	}
-	if _, err := s.issuer.Consume(req.GrantToken, a.ID); err != nil {
-		s.auditDeny(a.ID, g.Handle, "card", merchant, grantReason(err))
-		writeJSON(w, grantStatus(err), map[string]string{"error": "invalid grant"})
 		return
 	}
 	cred, err := s.st.GetCredential(g.Handle)
@@ -480,23 +487,41 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pay failed"})
 		return
 	}
+	// Fill before Consume: a fill failure must not burn a grant use.
 	freq, err := card.Fill(card.PayRequest{Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body}, fields)
 	if err != nil {
+		if errors.Is(err, card.ErrCVCRequired) {
+			s.auditDeny(a.ID, g.Handle, "card", merchant, "cvc_required")
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "cvc_required", "status": "need_cvc"})
+			return
+		}
 		s.auditDeny(a.ID, g.Handle, "card", merchant, "fill_error")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "fill failed"})
 		return
 	}
-	res, err := card.Do(r.Context(), prov, freq)
+	if _, err := s.issuer.Consume(req.GrantToken, a.ID); err != nil {
+		s.auditDeny(a.ID, g.Handle, "card", merchant, grantReason(err))
+		writeJSON(w, grantStatus(err), map[string]string{"error": "invalid grant"})
+		return
+	}
+	res, err := card.Do(r.Context(), prov, freq, fields)
 	if err != nil {
 		slog.Debug("card pay failed", "error", err)
 		s.auditDeny(a.ID, g.Handle, "card", merchant, "pay_error")
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pay failed"})
 		return
 	}
+	status := "upstream_error"
+	switch {
+	case res.Status >= 200 && res.Status < 300:
+		status = "ok"
+	case res.Status >= 400 && res.Status < 500:
+		status = "declined"
+	}
 	detail, _ := json.Marshal(map[string]any{"amount": req.Amount, "currency": req.Currency})
 	_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "card", Target: merchant, Decision: "allow", Detail: string(detail)})
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "sent", "http_status": res.Status, "headers": res.Headers,
+		"status": status, "http_status": res.Status, "headers": res.Headers,
 		"body": res.Body, "truncated": res.Truncated,
 	})
 }

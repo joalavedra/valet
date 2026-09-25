@@ -221,7 +221,7 @@ func New(b Backend) *mcp.Server {
 		func(ctx context.Context, req *mcp.CallToolRequest, args browserFillArgs) (*mcp.CallToolResult, any, error) {
 			return result(b.BrowserFill(ctx, args.Grant, args.CDPWSURL, args.Mapping, args.Submit, args.PageURL))
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "pay", Description: "Pay at a merchant's payment API using a stored card handle. Put {{card.number}}, {{card.exp_month}}, {{card.exp_year}}, {{card.cvc}}, {{card.holder}} placeholders in body; Valet substitutes and routes via the card vault proxy. Returns HTTP status + filtered body, never card data."},
+	mcp.AddTool(s, &mcp.Tool{Name: "pay", Description: "Pay at a merchant's payment API using a stored card handle. Put {{card.number}}, {{card.exp_month}}, {{card.exp_year}}, {{card.cvc}}, {{card.holder}} placeholders in body; Valet substitutes and routes via the card vault proxy. Returns status (ok/declined/upstream_error), http_status, filtered headers and redacted body — never card data."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args payArgs) (*mcp.CallToolResult, any, error) {
 			return result(b.Pay(ctx, args.Grant, args.URL, args.Method, args.Headers, args.Body, args.Amount, args.Currency))
 		})

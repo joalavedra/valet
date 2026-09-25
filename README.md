@@ -112,11 +112,20 @@ Placeholders (stored as credential fields by `cred add --type card`):
 | `{{card.number}}` | PAN alias |
 | `{{card.exp_month}}` / `{{card.exp_year}}` | expiry |
 | `{{card.holder}}` | cardholder name |
-| `{{card.cvc}}` | CVC alias (VOLATILE, optional — errors "cvc required (step-up)" if referenced but absent) |
+| `{{card.cvc}}` | CVC alias (VOLATILE, optional — 409 `{"error":"cvc_required","status":"need_cvc"}` if referenced but absent) |
 
-Policy: `spend.merchants` (glob on the request host), `spend.per_tx` cap;
-`amount`/`currency` are recorded in the audit row. Redirects are never
-followed and the response body is capped at 256 KiB.
+Card grants must be scoped — the policy needs `hosts` or `spend.merchants`
+(otherwise 403 `card grant must restrict merchants`); a `spend` policy also
+requires a positive `amount` (403 `amount required`). Policy:
+`spend.merchants` (glob on the request host), `spend.per_tx` cap;
+`amount`/`currency` are recorded in the audit row.
+
+Response: `{"status","http_status","headers","body","truncated"}` where
+`status` is `ok` (upstream 2xx), `declined` (4xx) or `upstream_error`
+(3xx/5xx). Hop-by-hop and `Proxy-*` request headers are dropped, redirects
+are never followed, the body is capped at 256 KiB, and the response body is
+redacted — stored field values, Luhn-valid PANs and CVC-shaped JSON values
+never reach the agent.
 
 ## Use from browser-use
 
