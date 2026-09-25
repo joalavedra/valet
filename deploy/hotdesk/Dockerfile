@@ -17,8 +17,9 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/valet .
 
 FROM alpine:3.21 AS release
 ARG VALET_VERSION
+ARG TARGETARCH
 RUN apk add --no-cache curl \
-    && curl -fsSL "https://github.com/joalavedra/valet/releases/download/v${VALET_VERSION}/valet_${VALET_VERSION}_linux_amd64.tar.gz" \
+    && curl -fsSL "https://github.com/joalavedra/valet/releases/download/v${VALET_VERSION}/valet_${VALET_VERSION}_linux_${TARGETARCH}.tar.gz" \
        | tar -xz -C /tmp valet \
     && mkdir -p /out && mv /tmp/valet /out/valet && chmod 755 /out/valet
 

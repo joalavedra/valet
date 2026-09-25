@@ -46,20 +46,25 @@ Prebuilt binaries for Linux, macOS, and Windows are on the
 [GitHub Releases](https://github.com/joalavedra/valet/releases) page.
 
 ```bash
-# Docker (server on :14400, data in a named volume)
-docker run -d -v valet-data:/data -p 14400:14400 \
-  -e VALET_MASTER_PASSWORD=changeme ghcr.io/joalavedra/valet:latest
+export VALET_MASTER_PASSWORD="$(openssl rand -base64 24)"  # keep this; it is the owner credential
+
+# Docker (server on 127.0.0.1:14400, data in a named volume)
+docker run -d -v valet-data:/data -p 127.0.0.1:14400:14400 \
+  -e VALET_MASTER_PASSWORD="$VALET_MASTER_PASSWORD" ghcr.io/joalavedra/valet:latest
 
 # or build from source with Go ≥ 1.26
 go install github.com/joalavedra/valet@latest
 ```
+
+The master password is also the owner bearer token — never expose the
+listen port publicly without a TLS/auth proxy in front.
 
 ## Quickstart
 
 ```bash
 make build
 
-export VALET_MASTER_PASSWORD=changeme
+export VALET_MASTER_PASSWORD="$(openssl rand -base64 24)"  # keep this; it is the owner credential
 
 ./valet cred add --type login --label joan --site github.com   # secrets via prompt/stdin
 ./valet cred list                                             # handles + metadata only
