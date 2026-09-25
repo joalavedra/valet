@@ -39,3 +39,21 @@ func TestEvaluate(t *testing.T) {
 		}
 	}
 }
+
+func TestGlobMatchPathSubtree(t *testing.T) {
+	cases := []struct {
+		pattern, value string
+		want           bool
+	}{
+		{"/api/*", "/api/v1/charges", true},
+		{"/api/*", "/api/x", true},
+		{"/api/*", "/other/x", false},
+		{"*.example.com", "a.example.com", true},
+		{"*.example.com", "example.com", true},
+	}
+	for _, c := range cases {
+		if got := globMatch(c.pattern, c.value); got != c.want {
+			t.Errorf("globMatch(%q,%q)=%v want %v", c.pattern, c.value, got, c.want)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -159,5 +160,75 @@ func TestDiscover(t *testing.T) {
 	svc, err := c.ServiceByName(context.Background(), "echo")
 	if err != nil || svc == nil {
 		t.Fatalf("ServiceByName: %v %v", svc, err)
+	}
+}
+
+func TestDoDoesNotFollowRedirects(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/secret", http.StatusFound)
+	}))
+	defer upstream.Close()
+	saw := map[string]string{}
+	proxy := fakeProxy(t, upstream.URL, "Basic dXNlcmluZm86", &saw)
+	defer proxy.Close()
+	c := testClient(t, proxy, "")
+	res, err := c.Do(context.Background(), Request{Method: "GET", URL: upstream.URL + "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != http.StatusFound {
+		t.Fatalf("expected 302 passthrough, got %d", res.Status)
+	}
+	if res.Headers["Location"] != "/secret" {
+		t.Fatalf("no Location header exposed: %v", res.Headers)
+	}
+}
+
+func TestDoDropsConnectionNamedHeaders(t *testing.T) {
+	saw := map[string]string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k := range r.Header {
+			saw[strings.ToLower(k)] = k
+		}
+	}))
+	defer upstream.Close()
+	proxy := fakeProxy(t, upstream.URL, "Basic dXNlcmluZm86", nil)
+	defer proxy.Close()
+	c := testClient(t, proxy, "")
+	_, err := c.Do(context.Background(), Request{Method: "GET", URL: upstream.URL + "/", Headers: map[string]string{
+		"Connection": "X-Smuggle, keep-alive", "X-Smuggle": "1", "X-Keep": "1",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := saw["x-smuggle"]; ok {
+		t.Fatal("Connection-named header was forwarded")
+	}
+	if _, ok := saw["x-keep"]; !ok {
+		t.Fatal("ordinary header missing")
+	}
+}
+
+func TestDoTruncatedOmitsContentLength(t *testing.T) {
+	big := strings.Repeat("a", maxBody+10)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		io.WriteString(w, big)
+	}))
+	defer upstream.Close()
+	proxy := fakeProxy(t, upstream.URL, "Basic dXNlcmluZm86", nil)
+	defer proxy.Close()
+	c := testClient(t, proxy, "")
+	res, err := c.Do(context.Background(), Request{Method: "GET", URL: upstream.URL + "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Truncated {
+		t.Fatal("expected truncated response")
+	}
+	for k := range res.Headers {
+		if strings.EqualFold(k, "Content-Length") {
+			t.Fatal("Content-Length emitted on truncated response")
+		}
 	}
 }
