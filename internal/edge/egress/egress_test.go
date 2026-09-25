@@ -232,3 +232,29 @@ func TestDoTruncatedOmitsContentLength(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactSecrets(t *testing.T) {
+	in := `{"headers":{"Authorization":"Bearer sk_live_abcdefghijklmnop","X-Api-Key":"AKIAABCDEFGHIJKLMNOP"},"token":"usd","status":"ok","id":"abc"}`
+	out, changed := RedactSecrets(in)
+	if !changed {
+		t.Fatal("expected redaction")
+	}
+	if strings.Contains(out, "sk_live_abcdefghijklmnop") || strings.Contains(out, "AKIAABCDEFGHIJKLMNOP") {
+		t.Fatalf("secrets leaked: %s", out)
+	}
+	if !strings.Contains(out, `"token":"usd"`) || !strings.Contains(out, `"id":"abc"`) {
+		t.Fatalf("over-redacted: %s", out)
+	}
+	// Bearer in free text (outside a credential-keyed JSON field)
+	out, _ = RedactSecrets(`Authorization: Bearer sk_live_abcdefghijklmnop`)
+	if strings.Contains(out, "sk_live_") || !strings.Contains(out, "Bearer [redacted]") {
+		t.Fatalf("bearer not redacted: %s", out)
+	}
+}
+
+func TestRedactSecretsNoOp(t *testing.T) {
+	in := `{"token":"usd","status":"ok","id":"abc"}`
+	if _, changed := RedactSecrets(in); changed {
+		t.Fatal("false positive")
+	}
+}
