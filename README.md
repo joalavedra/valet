@@ -92,6 +92,30 @@ curl -X POST localhost:14400/v1/edge/http/call -H "Authorization: Bearer $AGENT"
 The request URL host must match the discovered service host; hop-by-hop and
 `Proxy-*` agent headers are stripped, and `Set-Cookie` is never returned.
 
+## Use from browser-use
+
+`sdks/python` ships a `valet-agent` package with a browser-use adapter:
+
+```bash
+pip install -e 'sdks/python[browser-use]'
+```
+
+```python
+from browser_use import Agent, BrowserSession, ChatOpenAI, Tools
+from valet.browser_use import register_valet_tools
+from valet.client import ValetClient
+
+client = ValetClient()                      # VALET_ADDR + VALET_AGENT_TOKEN
+session = BrowserSession(cdp_url="http://127.0.0.1:9222")
+tools = register_valet_tools(Tools(), client, cdp_url=session.cdp_url)
+agent = Agent(task="Log in via valet_login ...", llm=ChatOpenAI(model="gpt-4o-mini"),
+              browser_session=session, tools=tools)
+```
+
+`valet_login` fills credentials via the browser-fill edge — the agent sees
+only a status string, never the password. See
+`sdks/python/examples/browser-use/login.py`.
+
 ## Dev
 
 ```bash
