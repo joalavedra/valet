@@ -17,3 +17,8 @@ coverage.out
 .idea/
 .vscode/
 *.swp
+
+# python
+__pycache__/
+*.egg-info/
+.pytest_cache/
