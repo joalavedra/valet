@@ -199,3 +199,24 @@ func TestResolvePageHostFallback(t *testing.T) {
 		t.Fatalf("host fallback: %q %v", got, err)
 	}
 }
+
+func TestPageTargetIDDedup(t *testing.T) {
+	if pageTargetID("ws://h:9/devtools/page/P1") != "P1" {
+		t.Fatal("bad id")
+	}
+	ts := fakeCDP(t, []map[string]any{page("https://a.example.com/login", "P1")})
+	defer ts.Close()
+	hostport := strings.TrimPrefix(ts.URL, "http://")
+	f := &CDPFiller{sess: map[string]*sessionEntry{
+		// Same target id as /json's P1 → must dedupe, not double-count.
+		"ws://" + hostport + "/devtools/page/P1": {},
+	}}
+	got, err := f.ResolvePage(context.Background(), ts.URL, "https://a.example.com/login")
+	if err != nil || !strings.HasSuffix(got, "/devtools/page/P1") {
+		t.Fatalf("dedup resolve: %q %v", got, err)
+	}
+	// A cached session on a different endpoint must not match its own host.
+	if _, err := f.ResolvePage(context.Background(), ts.URL, "https://only.example.com/"); err == nil {
+		t.Fatal("expected not found")
+	}
+}

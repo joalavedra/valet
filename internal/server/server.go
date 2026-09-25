@@ -253,6 +253,10 @@ func (s *Server) browserFill(w http.ResponseWriter, r *http.Request, a *store.Ag
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
+	if len(req.Mapping) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mapping required"})
+		return
+	}
 	cdpBase := req.CDPWSURL
 	if cdpBase == "" {
 		cdpBase = s.cdpDefault
