@@ -888,3 +888,36 @@ func TestCaptureCompleteRejectsNonTokAlias(t *testing.T) {
 		t.Fatalf("non-tok string accepted: %d %s", rec.Code, rec.Body)
 	}
 }
+
+func TestCaptureCompleteNumericCVC(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	tok := newCapture(t, st, "visa-num", time.Hour)
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_sandbox_pan2", "cvc": "123", "exp_month": "12",
+		"exp_year": "2030", "holder": "T", "bin": "411111",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("numeric cvc rejected: %d %s", rec.Code, rec.Body)
+	}
+	cred, err := st.GetCredential("card://visa-num")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cred.Metadata, `"bin":"411111"`) {
+		t.Fatalf("metadata: %s", cred.Metadata)
+	}
+}
+
+func TestCaptureCompleteRejectsLongCVC(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	tok := newCapture(t, st, "visa-x", time.Hour)
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_sandbox_pan1", "cvc": "4111111111111111",
+		"exp_month": "12", "exp_year": "2030",
+	})
+	if rec.Code != 400 {
+		t.Fatalf("16-digit cvc accepted: %d", rec.Code)
+	}
+}

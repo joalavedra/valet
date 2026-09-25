@@ -52,7 +52,7 @@ form.field('#cc-number', {name:'number', type:'card-number', placeholder:'Card n
   tokenization:{format:'UUID', storage:'PERSISTENT'}});
 form.field('#cc-cvc', {name:'cvc', type:'card-security-code', placeholder:'CVC',
   validations:['required','validCardSecurityCode'], autoComplete:'cc-csc',
-  tokenization:{format:'UUID', storage:'VOLATILE'}});
+  tokenization:{format:'NUM_LENGTH_PRESERVING', storage:'VOLATILE'}});
 
 function aliasFor(data, name) {
   if (!data) return '';
@@ -72,6 +72,9 @@ function aliasFor(data, name) {
 function looksLikeAlias(a) {
   return typeof a === 'string' && a.indexOf('tok_') === 0;
 }
+function looksLikeCVC(a) {
+  return typeof a === 'string' && (a.indexOf('tok_') === 0 || /^\d{3,4}$/.test(a));
+}
 document.getElementById('f').addEventListener('submit', function(e) {
   e.preventDefault();
   var msg = document.getElementById('msg');
@@ -79,18 +82,21 @@ document.getElementById('f').addEventListener('submit', function(e) {
   form.tokenize(function(status, data) {
     var num = aliasFor(data, 'number');
     var cvc = aliasFor(data, 'cvc');
-    if (!looksLikeAlias(num)) {
+    if (!looksLikeAlias(num) || (cvc && !looksLikeCVC(cvc))) {
       msg.textContent = 'Tokenization returned unexpected data (keys: ' + (data ? Object.keys(data).join(',') : 'none') + '). No card data sent.';
       return;
     }
-    var last4 = '';
-    if (state && state.number && state.number.last4) last4 = state.number.last4;
+    var last4 = '', bin = '';
+    if (state && state.number) {
+      if (state.number.last4) last4 = state.number.last4;
+      if (state.number.bin) bin = state.number.bin;
+    }
     fetch('/capture/{{.Token}}/complete', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({number:num, cvc:cvc,
         exp_month:document.getElementById('exp_month').value,
         exp_year:document.getElementById('exp_year').value,
         holder:document.getElementById('holder').value,
-        last4:last4})})
+        last4:last4, bin:bin})})
       .then(function(r){return r.json().then(function(j){return {r:r,j:j}})})
       .then(function(x){ msg.textContent = x.r.ok ? 'Card captured. You can close this page.' : ('Error: ' + (x.j.error || x.r.status)); })
       .catch(function(err){ msg.textContent = 'Error: ' + err; });

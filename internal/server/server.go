@@ -195,9 +195,12 @@ type captureCompleteRequest struct {
 	ExpYear  string `json:"exp_year"`
 	Holder   string `json:"holder"`
 	Last4    string `json:"last4"`
+	Bin      string `json:"bin"`
 }
 
 var tokAliasRE = regexp.MustCompile(`^tok_[A-Za-z0-9_]+$`)
+var cvcAliasRE = regexp.MustCompile(`^(tok_[A-Za-z0-9_]+|\d{3,4})$`)
+var binRE = regexp.MustCompile(`^\d{6,8}$`)
 
 func luhnPan(s string) bool {
 	var digits []byte
@@ -240,11 +243,12 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	// Only UUID-format aliases (tok_…) are accepted — raw PANs or
-	// format-preserving aliases (which are themselves Luhn-valid PANs)
-	// are rejected. Luhn check kept as belt-and-braces.
+	// Number must be a UUID-format alias (tok_…) — raw PANs and
+	// format-preserving aliases (themselves Luhn-valid) are rejected.
+	// CVC aliases may be tok_ or a 3–4 digit length-preserving alias;
+	// digits that short can't be a PAN.
 	if !tokAliasRE.MatchString(req.Number) || luhnPan(req.Number) ||
-		(req.CVC != "" && (!tokAliasRE.MatchString(req.CVC) || luhnPan(req.CVC))) {
+		(req.CVC != "" && !cvcAliasRE.MatchString(req.CVC)) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "raw card data rejected"})
 		return
 	}
@@ -272,7 +276,11 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 	if last4 == "" && len(req.Number) >= 4 {
 		last4 = req.Number[len(req.Number)-4:]
 	}
-	meta, _ := json.Marshal(map[string]string{"provider": "vgs", "last4": last4, "source": "collect"})
+	metaMap := map[string]string{"provider": "vgs", "last4": last4, "source": "collect"}
+	if binRE.MatchString(req.Bin) {
+		metaMap["bin"] = req.Bin
+	}
+	meta, _ := json.Marshal(metaMap)
 	pt, _ := json.Marshal(fields)
 	ct, err := crypto.Encrypt(s.dek, pt)
 	if err != nil {

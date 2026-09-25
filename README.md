@@ -168,10 +168,15 @@ enable **Intercept CORS** in Vault Settings → Advanced.
 `GET /capture/<token>` renders an embedded page that loads VGS Collect.js
 3.4.0 (hosted iframes for number + CVC; expiry/holder are plain inputs) and
 calls `form.tokenize()` — the PAN goes straight to the VGS vault. The page
-posts only aliases to `POST /capture/<token>/complete`. The page requests
-**UUID-format** aliases (`tok_…`) — never format-preserving ones, which are
-themselves Luhn-valid PANs — and the server rejects anything that isn't a
-`tok_` string (or is a Luhn PAN) with `raw card data rejected`, claims
+posts only aliases to `POST /capture/<token>/complete`. The number must be
+a **UUID-format** alias (`tok_…`) — the server rejects anything else,
+including format-preserving aliases which are themselves Luhn-valid PANs.
+The CVC alias VGS returns is **numeric length-preserving** (3–4 digits —
+VGS forces this for VOLATILE card-security-code storage regardless of the
+requested format), so the server accepts `tok_…` or `\d{3,4}` for `cvc`.
+Collect's field state also supplies `last4`/`bin` (stored in metadata —
+BIN is the non-sensitive first 6–8 digits). Rejections return
+`raw card data rejected`; completion claims
 the capture atomically, and stores a `card://<label>` credential identical
 to `cred add --type card`, so `pay` works unchanged. Links are single-use
 and expire; the base URL comes from `VALET_PUBLIC_URL` (default
