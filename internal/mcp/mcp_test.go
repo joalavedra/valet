@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,5 +96,35 @@ func TestPay(t *testing.T) {
 	_, err := b.Pay(context.Background(), "g.sig", "shop.com", 500, "USD", "")
 	if err == nil || !strings.Contains(err.Error(), "501") {
 		t.Fatalf("want 501 error, got %v", err)
+	}
+}
+
+func TestHTTPCallRoundTrip(t *testing.T) {
+	var got map[string]any
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/edge/http/call" {
+			t.Errorf("path %q", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			t.Error("missing bearer")
+		}
+		json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"status":200,"headers":{},"body":"ok"}`)
+	}))
+	defer api.Close()
+	b := &HTTPBackend{Base: api.URL, Token: "tok"}
+	out, err := b.HTTPCall(context.Background(), "g1", "GET", "https://api.stripe.com/v1/x", `{"X-A":"1"}`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	if m["status"] != float64(200) || m["body"] != "ok" {
+		t.Fatalf("out %v", m)
+	}
+	if got["grant_token"] != "g1" || got["method"] != "GET" || got["url"] != "https://api.stripe.com/v1/x" {
+		t.Fatalf("payload %v", got)
+	}
+	if h, ok := got["headers"].(map[string]any); !ok || h["X-A"] != "1" {
+		t.Fatalf("headers %v", got["headers"])
 	}
 }

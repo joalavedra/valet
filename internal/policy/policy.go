@@ -61,11 +61,18 @@ func deny(reason string) Decision { return Decision{Allow: false, Reason: reason
 
 var allow = Decision{Allow: true, Reason: "ok"}
 
+// GlobMatch reports whether value matches a host/path glob pattern.
+func GlobMatch(pattern, value string) bool { return globMatch(pattern, value) }
+
 func globMatch(pattern, value string) bool {
 	if pattern == "*" {
 		return true
 	}
 	if ok, _ := path.Match(pattern, value); ok {
+		return true
+	}
+	// path.Match's * doesn't cross "/"; treat a trailing /* as a subtree.
+	if strings.HasSuffix(pattern, "/*") && strings.HasPrefix(value, pattern[:len(pattern)-1]) {
 		return true
 	}
 	if strings.HasPrefix(pattern, "*.") && (value == pattern[2:] || strings.HasSuffix(value, pattern[1:])) {
