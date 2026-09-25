@@ -32,7 +32,8 @@ elif [ ! -f "$STATE/master.key" ]; then
   # Write to a temp file and mv -n so a racing second start can't clobber it.
   tmp="$STATE/.master.key.$$"
   (umask 077 && head -c 32 /dev/urandom | base64 -w0 > "$tmp")
-  mv -n "$tmp" "$STATE/master.key" 2>/dev/null || rm -f "$tmp"
+  mv -n "$tmp" "$STATE/master.key" 2>/dev/null || true
+  rm -f "$tmp"
 fi
 
 export VALET_MASTER_PASSWORD
