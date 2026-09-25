@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -229,6 +230,77 @@ func TestDoTruncatedOmitsContentLength(t *testing.T) {
 	for k := range res.Headers {
 		if strings.EqualFold(k, "Content-Length") {
 			t.Fatal("Content-Length emitted on truncated response")
+		}
+	}
+}
+
+func TestRedactSecrets(t *testing.T) {
+	in := `{"headers":{"Authorization":"Bearer sk_live_abcdefghijklmnop","X-Api-Key":"AKIAABCDEFGHIJKLMNOP"},"token":"usd","status":"ok","id":"abc"}`
+	out, changed := RedactSecrets(in)
+	if !changed {
+		t.Fatal("expected redaction")
+	}
+	if strings.Contains(out, "sk_live_abcdefghijklmnop") || strings.Contains(out, "AKIAABCDEFGHIJKLMNOP") {
+		t.Fatalf("secrets leaked: %s", out)
+	}
+	if !strings.Contains(out, `"token":"usd"`) || !strings.Contains(out, `"id":"abc"`) {
+		t.Fatalf("over-redacted: %s", out)
+	}
+	// Bearer in free text (outside a credential-keyed JSON field)
+	out, _ = RedactSecrets(`Authorization: Bearer sk_live_abcdefghijklmnop`)
+	if strings.Contains(out, "sk_live_") || !strings.Contains(out, "Bearer [redacted]") {
+		t.Fatalf("bearer not redacted: %s", out)
+	}
+}
+
+func TestRedactSecretsNoOp(t *testing.T) {
+	in := `{"token":"usd","status":"ok","id":"abc"}`
+	if _, changed := RedactSecrets(in); changed {
+		t.Fatal("false positive")
+	}
+}
+
+func TestRedactSecretsJSONEscapes(t *testing.T) {
+	in := `{"api_key":"abc\"def\\ghij","x":1}`
+	out, changed := RedactSecrets(in)
+	if !changed || out != `{"api_key":"[redacted]","x":1}` {
+		t.Fatalf("got %q changed=%v", out, changed)
+	}
+	if !json.Valid([]byte(out)) {
+		t.Fatalf("invalid JSON: %q", out)
+	}
+	// Escape near the end of the value
+	in = `{"api_key":"abcdefgh\"","x":1}`
+	out, _ = RedactSecrets(in)
+	if out != `{"api_key":"[redacted]","x":1}` || !json.Valid([]byte(out)) {
+		t.Fatalf("got %q", out)
+	}
+}
+
+func TestDoRedactsResponseHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Length", "2")
+		w.Header().Set("Location", "https://x/?access_token=sk_live_abcdefghijkl")
+		io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+	proxy := fakeProxy(t, upstream.URL, "Basic dXNlcmluZm86", nil)
+	defer proxy.Close()
+	c := testClient(t, proxy, "")
+	res, err := c.Do(context.Background(), Request{Method: "GET", URL: upstream.URL + "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Redacted {
+		t.Fatal("expected Redacted")
+	}
+	if strings.Contains(res.Headers["Location"], "sk_live_") {
+		t.Fatalf("secret in Location: %q", res.Headers["Location"])
+	}
+	for k := range res.Headers {
+		if strings.EqualFold(k, "Content-Length") {
+			t.Fatal("stale Content-Length emitted on redacted response")
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -157,6 +158,10 @@ type Response struct {
 	Headers   map[string]string `json:"headers"`
 	Body      string            `json:"body"`
 	Truncated bool              `json:"truncated,omitempty"`
+	// Redacted is true when best-effort secret redaction replaced something
+	// in Body (Valet never sees the injected credential, so this is
+	// pattern-based only).
+	Redacted bool `json:"redacted,omitempty"`
 }
 
 const maxBody = 1 << 20
@@ -170,6 +175,27 @@ var hopHeaders = map[string]bool{
 var respHeaders = map[string]bool{
 	"content-type": true, "content-length": true, "date": true,
 	"x-request-id": true, "retry-after": true, "location": true,
+}
+
+var (
+	secretKVRE = regexp.MustCompile(
+		`(?i)("(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|secret[_-]?key|private[_-]?key|password|passwd|authorization|x-api-key|token|secret)"\s*:\s*")((?:[^"\\]|\\.){8,})(")`)
+	bearerRE   = regexp.MustCompile(`(?i)\bBearer\s+([A-Za-z0-9\-._~+/]+=*)`)
+	keyShapeRE = regexp.MustCompile(
+		`sk-[A-Za-z0-9_-]{16,}|sk_(live|test)_[A-Za-z0-9]{8,}|rk_(live|test)_[A-Za-z0-9]{8,}|` +
+			`gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|` +
+			`AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,}`)
+)
+
+// RedactSecrets best-effort masks credential-shaped strings in a response
+// body: credential-ish JSON keys, Bearer tokens, and well-known key formats.
+// Valet never sees the injected credential value, so this is heuristic — it
+// catches echoes (e.g. httpbin responses), not a guarantee.
+func RedactSecrets(s string) (out string, changed bool) {
+	out = secretKVRE.ReplaceAllString(s, "${1}[redacted]${3}")
+	out = bearerRE.ReplaceAllString(out, "Bearer [redacted]")
+	out = keyShapeRE.ReplaceAllString(out, "[redacted]")
+	return out, out != s
 }
 
 // Do forwards req through the proxy and returns the filtered response.
@@ -219,13 +245,21 @@ func (c *Client) Do(ctx context.Context, in Request) (*Response, error) {
 		out.Body = string(raw[:maxBody])
 		out.Truncated = true
 	}
+	out.Body, out.Redacted = RedactSecrets(out.Body)
 	for k, vv := range resp.Header {
 		lk := strings.ToLower(k)
 		if respHeaders[lk] || strings.HasPrefix(lk, "x-ratelimit-") {
-			if out.Truncated && lk == "content-length" {
-				continue
+			v, changed := RedactSecrets(strings.Join(vv, ", "))
+			out.Redacted = out.Redacted || changed
+			out.Headers[k] = v
+		}
+	}
+	// A truncated or redacted body no longer matches the upstream length.
+	if out.Truncated || out.Redacted {
+		for k := range out.Headers {
+			if strings.ToLower(k) == "content-length" {
+				delete(out.Headers, k)
 			}
-			out.Headers[k] = strings.Join(vv, ", ")
 		}
 	}
 	return out, nil

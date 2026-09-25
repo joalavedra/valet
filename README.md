@@ -91,6 +91,12 @@ curl -X POST localhost:14400/v1/edge/http/call -H "Authorization: Bearer $AGENT"
 
 The request URL host must match the discovered service host; hop-by-hop and
 `Proxy-*` agent headers are stripped, and `Set-Cookie` is never returned.
+The response body is redacted best-effort (`redacted: true` when applied):
+Valet can't see the injected credential value, so it masks common secret
+shapes (`sk_live_…`, `ghp_…`, `AKIA…`, `Bearer …`, etc.) and quoted JSON
+fields with credential-looking names (`"api_key"`, `"access_token"`,
+`"password"`, `"secret"`, `"token"`, …, values ≥ 8 chars) — this catches
+echoed credentials in responses like httpbin's, it is not a guarantee.
 
 ## Card payments via VGS
 
@@ -222,8 +228,10 @@ matching page target (exact match, then host+path ignoring query, then a
 unique-host fallback; ambiguous → error). The default endpoint's host must
 still satisfy `VALET_CDP_ALLOW` (loopback by default).
 
-Note: the `--http` transport has no auth of its own — bind loopback or put it
-behind a trusted proxy.
+`--http` auth: set `VALET_MCP_TOKEN` and clients must send `Authorization:
+Bearer <token>` (401 + `Cache-Control: no-store` otherwise). Without a
+token, only loopback binds are allowed — `valet mcp --http` refuses to
+start on `0.0.0.0`/non-loopback addresses.
 
 See [deploy/hotdesk](deploy/hotdesk) for a drop-in hotdesk desktop image that
 bundles Valet into `hotdesk-desktop` (supervisor-managed server, credentials

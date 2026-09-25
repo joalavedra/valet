@@ -20,15 +20,15 @@ var mcpCmd = &cobra.Command{
 		}
 		b := &vmcp.HTTPBackend{Base: addr, Token: os.Getenv("VALET_AGENT_TOKEN")}
 		if mcpHTTP != "" {
-			// The streamable HTTP transport has no auth of its own; only bind
-			// loopback or sit behind a trusted proxy.
-			return vmcp.RunHTTP(cmd.Context(), b, mcpHTTP)
+			// Bearer auth is enforced when VALET_MCP_TOKEN is set; without it
+			// only loopback binds are allowed (RunHTTP refuses otherwise).
+			return vmcp.RunHTTP(cmd.Context(), b, mcpHTTP, os.Getenv("VALET_MCP_TOKEN"))
 		}
 		return vmcp.Run(cmd.Context(), b)
 	},
 }
 
 func init() {
-	mcpCmd.Flags().StringVar(&mcpHTTP, "http", "", "serve MCP over streamable HTTP at ADDR/mcp (e.g. 127.0.0.1:14401); no auth — loopback/trusted proxy only")
+	mcpCmd.Flags().StringVar(&mcpHTTP, "http", "", "serve MCP over streamable HTTP at ADDR/mcp (e.g. 127.0.0.1:14401); requires Authorization: Bearer $VALET_MCP_TOKEN when set, loopback-only otherwise")
 	rootCmd.AddCommand(mcpCmd)
 }
