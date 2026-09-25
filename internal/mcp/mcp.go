@@ -5,10 +5,12 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -233,14 +235,51 @@ func Run(ctx context.Context, b Backend) error {
 	return New(b).Run(ctx, &mcp.StdioTransport{})
 }
 
-// RunHTTP serves the MCP server over streamable HTTP on {addr}/mcp.
-// The transport has no auth of its own — bind to loopback or a trusted proxy.
-func RunHTTP(ctx context.Context, b Backend, addr string) error {
+// loopbackAddr reports whether addr binds only loopback interfaces.
+func loopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// Handler builds the streamable-HTTP /mcp handler, optionally behind a
+// Bearer-token check (VALET_MCP_TOKEN). With an empty token the handler is
+// unauthenticated.
+func Handler(b Backend, token string) http.Handler {
 	srv := New(b)
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
+	inner := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", handler)
-	h := &http.Server{Addr: addr, Handler: mux}
+	mux.Handle("/mcp", inner)
+	if token == "" {
+		return mux
+	}
+	want := "Bearer " + token
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) != 1 {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// RunHTTP serves the MCP server over streamable HTTP on {addr}/mcp.
+// With a non-empty token the transport requires `Authorization: Bearer
+// <token>`; without one, addr must be loopback.
+func RunHTTP(ctx context.Context, b Backend, addr, token string) error {
+	if token == "" && !loopbackAddr(addr) {
+		return fmt.Errorf("valet mcp --http: VALET_MCP_TOKEN is required when binding a non-loopback address")
+	}
+	h := &http.Server{Addr: addr, Handler: Handler(b, token)}
 	go func() {
 		<-ctx.Done()
 		_ = h.Shutdown(context.Background())

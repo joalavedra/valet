@@ -160,7 +160,7 @@ func TestRunHTTP(t *testing.T) {
 	}
 	addr := ln.Addr().String()
 	_ = ln.Close()
-	go func() { _ = RunHTTP(ctx, stubBackend{}, addr) }()
+	go func() { _ = RunHTTP(ctx, stubBackend{}, addr, "") }()
 	var client *mcp.Client
 	var cs *mcp.ClientSession
 	deadline := time.Now().Add(5 * time.Second)
@@ -193,5 +193,57 @@ func TestRunHTTP(t *testing.T) {
 	}
 	if !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "cred://x/y") {
 		t.Fatalf("result: %+v", res.Content[0])
+	}
+}
+
+func TestHandlerAuth(t *testing.T) {
+	h := Handler(stubBackend{}, "s3cret")
+	for _, tc := range []struct {
+		name string
+		auth string
+		want int
+		noSt bool
+	}{
+		{"no header", "", 401, true},
+		{"wrong token", "Bearer nope", 401, true},
+		{"right token", "Bearer s3cret", 400, false}, // streamable handler rejects bare GET but auths pass
+	} {
+		r := httptest.NewRequest("GET", "/mcp", nil)
+		if tc.auth != "" {
+			r.Header.Set("Authorization", tc.auth)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if tc.want == 401 {
+			if rec.Code != 401 {
+				t.Fatalf("%s: got %d", tc.name, rec.Code)
+			}
+			if rec.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("%s: missing no-store", tc.name)
+			}
+		} else if rec.Code == 401 {
+			t.Fatalf("%s: got 401", tc.name)
+		}
+	}
+}
+
+func TestLoopbackAddr(t *testing.T) {
+	for _, tc := range []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:1", true}, {"localhost:1", true}, {"[::1]:1", true},
+		{":1", false}, {"0.0.0.0:1", false}, {"10.0.0.1:1", false}, {"[::]:1", false},
+	} {
+		if got := loopbackAddr(tc.addr); got != tc.want {
+			t.Errorf("loopbackAddr(%q)=%v want %v", tc.addr, got, tc.want)
+		}
+	}
+}
+
+func TestRunHTTPNonLoopbackNoToken(t *testing.T) {
+	if err := RunHTTP(context.Background(), stubBackend{}, "0.0.0.0:1", ""); err == nil ||
+		!strings.Contains(err.Error(), "VALET_MCP_TOKEN") {
+		t.Fatalf("err=%v", err)
 	}
 }
