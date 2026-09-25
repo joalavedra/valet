@@ -98,8 +98,8 @@ func TestDoTruncatedDropsContentLength(t *testing.T) {
 
 // TestVGSLive exercises the real proxy auth + CA chain; skipped without env.
 func TestVGSLive(t *testing.T) {
-	if os.Getenv("VGS_VAULT_ID") == "" {
-		t.Skip("VGS_VAULT_ID not set")
+	if os.Getenv("VGS_VAULT_ID") == "" || os.Getenv("VGS_USERNAME") == "" || os.Getenv("VGS_PASSWORD") == "" {
+		t.Skip("VGS_VAULT_ID/VGS_USERNAME/VGS_PASSWORD not all set")
 	}
 	v := &VGS{
 		VaultID:  os.Getenv("VGS_VAULT_ID"),
