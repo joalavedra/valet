@@ -42,6 +42,12 @@ func Parse(h string) (kind, site, label string, err error) {
 		}
 		return "cred", parts[0], parts[1], nil
 	}
+	if rest, ok := strings.CutPrefix(h, "api://"); ok {
+		if rest == "" {
+			return "", "", "", fmt.Errorf("malformed api handle %q", h)
+		}
+		return "api", "", rest, nil
+	}
 	if rest, ok := strings.CutPrefix(h, "card://"); ok {
 		if rest == "" {
 			return "", "", "", fmt.Errorf("malformed card handle %q", h)

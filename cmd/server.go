@@ -12,6 +12,7 @@ import (
 	"github.com/joalavedra/valet/internal/audit"
 	"github.com/joalavedra/valet/internal/crypto"
 	"github.com/joalavedra/valet/internal/edge/browser"
+	"github.com/joalavedra/valet/internal/edge/egress"
 	"github.com/joalavedra/valet/internal/grant"
 	"github.com/joalavedra/valet/internal/server"
 	"github.com/joalavedra/valet/internal/store"
@@ -33,9 +34,21 @@ var serverCmd = &cobra.Command{
 			return err
 		}
 		iss := grant.NewIssuer(st, dek)
-		srv := server.New(st, iss, audit.New(st), &browser.CDPFiller{}, dek)
-		fmt.Println("valet server listening on :14400")
-		return http.ListenAndServe(":14400", srv)
+		var eg *egress.Client
+		if cfg, ok := egress.FromEnv(); ok {
+			eg, err = egress.New(cfg)
+			if err != nil {
+				return err
+			}
+		}
+		srv := server.New(st, iss, audit.New(st), &browser.CDPFiller{}, dek, eg)
+		srv.SetCDPDefault(os.Getenv("VALET_CDP_URL"))
+		listen := os.Getenv("VALET_LISTEN")
+		if listen == "" {
+			listen = ":14400"
+		}
+		fmt.Println("valet server listening on", listen)
+		return http.ListenAndServe(listen, srv)
 	},
 }
 
@@ -86,6 +99,10 @@ func loadDEK(st store.Store) ([]byte, error) {
 
 func init() {
 	home, _ := os.UserHomeDir()
-	rootCmd.PersistentFlags().StringVar(&serverDB, "db", filepath.Join(home, ".valet", "valet.db"), "path to SQLite database")
+	defaultDB := os.Getenv("VALET_DB")
+	if defaultDB == "" {
+		defaultDB = filepath.Join(home, ".valet", "valet.db")
+	}
+	rootCmd.PersistentFlags().StringVar(&serverDB, "db", defaultDB, "path to SQLite database (default $VALET_DB or ~/.valet/valet.db)")
 	rootCmd.AddCommand(serverCmd)
 }

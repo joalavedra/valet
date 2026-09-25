@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,8 +20,9 @@ import (
 type Backend interface {
 	ListHandles(ctx context.Context) (any, error)
 	RequestGrant(ctx context.Context, handle string, policyJSON string, ttl string) (any, error)
-	BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string) (any, error)
-	Pay(ctx context.Context, grant, merchant string, amount int64, currency, rail string) (any, error)
+	BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string, pageURL string) (any, error)
+	HTTPCall(ctx context.Context, grant, method, url, headersJSON, body string) (any, error)
+	Pay(ctx context.Context, grant, url, method string, headers map[string]string, body string, amount int64, currency string) (any, error)
 }
 
 // HTTPBackend forwards tool calls to a running valet server.
@@ -114,20 +116,47 @@ func (b *HTTPBackend) RequestGrant(ctx context.Context, handle, policyJSON, ttl 
 }
 
 // BrowserFill asks the browser edge to fill fields via CDP.
-func (b *HTTPBackend) BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string) (any, error) {
+func (b *HTTPBackend) BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string, pageURL string) (any, error) {
 	var out any
-	err := b.call(ctx, "POST", "/v1/edge/browser/fill", map[string]any{
-		"grant_token": grant, "cdp_ws_url": cdpWSURL, "mapping": mapping, "submit": submit,
-	}, &out)
+	body := map[string]any{"grant_token": grant, "mapping": mapping}
+	if cdpWSURL != "" {
+		body["cdp_ws_url"] = cdpWSURL
+	}
+	if submit != "" {
+		body["submit"] = submit
+	}
+	if pageURL != "" {
+		body["page_url"] = pageURL
+	}
+	err := b.call(ctx, "POST", "/v1/edge/browser/fill", body, &out)
 	return out, err
 }
 
-// Pay asks the card edge to pay merchant.
-func (b *HTTPBackend) Pay(ctx context.Context, grant, merchant string, amount int64, currency, rail string) (any, error) {
+// HTTPCall asks the egress edge to perform an authenticated HTTP request.
+func (b *HTTPBackend) HTTPCall(ctx context.Context, grant, method, url, headersJSON, body string) (any, error) {
+	payload := map[string]any{"grant_token": grant, "method": method, "url": url, "body": body}
+	if headersJSON != "" {
+		var h map[string]string
+		if err := json.Unmarshal([]byte(headersJSON), &h); err != nil {
+			return nil, fmt.Errorf("invalid headers json: %w", err)
+		}
+		payload["headers"] = h
+	}
 	var out any
-	err := b.call(ctx, "POST", "/v1/edge/card/pay", map[string]any{
-		"grant": grant, "merchant": merchant, "amount": amount, "currency": currency, "rail": rail,
-	}, &out)
+	err := b.call(ctx, "POST", "/v1/edge/http/call", payload, &out)
+	return out, err
+}
+
+func (b *HTTPBackend) Pay(ctx context.Context, grant, url, method string, headers map[string]string, body string, amount int64, currency string) (any, error) {
+	var out any
+	payload := map[string]any{
+		"grant_token": grant, "url": url, "method": method,
+		"body": body, "amount": amount, "currency": currency,
+	}
+	if len(headers) > 0 {
+		payload["headers"] = headers
+	}
+	err := b.call(ctx, "POST", "/v1/edge/card/pay", payload, &out)
 	return out, err
 }
 
@@ -149,17 +178,20 @@ type httpCallArgs struct {
 
 type browserFillArgs struct {
 	Grant    string            `json:"grant" jsonschema:"grant token"`
-	CDPWSURL string            `json:"cdp_ws_url" jsonschema:"CDP websocket URL of the agent browser"`
+	CDPWSURL string            `json:"cdp_ws_url,omitempty" jsonschema:"optional; defaults to the server's VALET_CDP_URL"`
+	PageURL  string            `json:"page_url,omitempty" jsonschema:"URL of the tab to fill; Valet picks the matching tab"`
 	Mapping  map[string]string `json:"mapping" jsonschema:"field name -> CSS selector"`
 	Submit   string            `json:"submit,omitempty" jsonschema:"optional submit-button CSS selector"`
 }
 
 type payArgs struct {
-	Grant    string `json:"grant" jsonschema:"grant token"`
-	Merchant string `json:"merchant" jsonschema:"merchant domain"`
-	Amount   int64  `json:"amount" jsonschema:"amount in minor currency units"`
-	Currency string `json:"currency" jsonschema:"ISO currency code"`
-	Rail     string `json:"rail,omitempty" jsonschema:"payment rail override"`
+	Grant    string            `json:"grant" jsonschema:"grant token"`
+	URL      string            `json:"url" jsonschema:"merchant payment API URL (https)"`
+	Method   string            `json:"method,omitempty" jsonschema:"HTTP method, default POST"`
+	Headers  map[string]string `json:"headers,omitempty" jsonschema:"extra request headers"`
+	Body     string            `json:"body" jsonschema:"request body; use {{card.number}} {{card.exp_month}} {{card.exp_year}} {{card.cvc}} {{card.holder}} placeholders"`
+	Amount   int64             `json:"amount" jsonschema:"amount in minor currency units"`
+	Currency string            `json:"currency" jsonschema:"ISO currency code"`
 }
 
 func result(v any, err error) (*mcp.CallToolResult, any, error) {
@@ -181,17 +213,17 @@ func New(b Backend) *mcp.Server {
 		func(ctx context.Context, req *mcp.CallToolRequest, args requestGrantArgs) (*mcp.CallToolResult, any, error) {
 			return result(b.RequestGrant(ctx, args.Handle, args.Policy, args.TTL))
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "http_call", Description: "Make an authenticated HTTP call through the egress edge (delegated to Infisical Agent Vault in Phase 1)."},
+	mcp.AddTool(s, &mcp.Tool{Name: "http_call", Description: "Authenticated HTTP call via the egress edge (Infisical Agent Vault injects the credential; the agent never sees it)"},
 		func(ctx context.Context, req *mcp.CallToolRequest, args httpCallArgs) (*mcp.CallToolResult, any, error) {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "not_implemented"}}, IsError: true}, nil, nil
+			return result(b.HTTPCall(ctx, args.Grant, args.Method, args.URL, args.Headers, args.Body))
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "browser_fill", Description: "Fill login form fields in the agent's browser via CDP. Returns status only, never typed values."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args browserFillArgs) (*mcp.CallToolResult, any, error) {
-			return result(b.BrowserFill(ctx, args.Grant, args.CDPWSURL, args.Mapping, args.Submit))
+			return result(b.BrowserFill(ctx, args.Grant, args.CDPWSURL, args.Mapping, args.Submit, args.PageURL))
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "pay", Description: "Pay a merchant with a stored card handle. Returns a receipt/status, never a PAN."},
+	mcp.AddTool(s, &mcp.Tool{Name: "pay", Description: "Pay at a merchant's payment API using a stored card handle. Put {{card.number}}, {{card.exp_month}}, {{card.exp_year}}, {{card.cvc}}, {{card.holder}} placeholders in body; Valet substitutes and routes via the card vault proxy. Returns status (ok/declined/upstream_error), http_status, filtered headers and redacted body — never card data."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args payArgs) (*mcp.CallToolResult, any, error) {
-			return result(b.Pay(ctx, args.Grant, args.Merchant, args.Amount, args.Currency, args.Rail))
+			return result(b.Pay(ctx, args.Grant, args.URL, args.Method, args.Headers, args.Body, args.Amount, args.Currency))
 		})
 	return s
 }
@@ -199,4 +231,22 @@ func New(b Backend) *mcp.Server {
 // Run serves the MCP server over stdio.
 func Run(ctx context.Context, b Backend) error {
 	return New(b).Run(ctx, &mcp.StdioTransport{})
+}
+
+// RunHTTP serves the MCP server over streamable HTTP on {addr}/mcp.
+// The transport has no auth of its own — bind to loopback or a trusted proxy.
+func RunHTTP(ctx context.Context, b Backend, addr string) error {
+	srv := New(b)
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", handler)
+	h := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		_ = h.Shutdown(context.Background())
+	}()
+	if err := h.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }

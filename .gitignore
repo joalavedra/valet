@@ -1,5 +1,5 @@
 # Binaries
-valet
+/valet
 *.exe
 *.out
 coverage.out
@@ -17,3 +17,8 @@ coverage.out
 .idea/
 .vscode/
 *.swp
+
+# python
+__pycache__/
+*.egg-info/
+.pytest_cache/

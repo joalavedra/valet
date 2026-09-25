@@ -1,0 +1,40 @@
+# Example VGS outbound route: reveals (ENRICH) VGS aliases under
+# $.card.number in JSON request bodies to https://httpbin.org/post,
+# where VGS detokenizes them to real values in transit.
+# Import via the VGS dashboard Routes page or `vgs apply`.
+version: 1
+data:
+- type: rule_chain
+  attributes:
+    tags:
+      name: httpbin-outbound-reveal
+      source: RouteContainer
+    destination_override_endpoint: https://httpbin.org
+    host_endpoint: (.*)\.verygoodproxy\.com
+    port: 80
+    protocol: http
+    source_endpoint: '*'
+    entries:
+    - classifiers: {}
+      config:
+        condition: AND
+        rules:
+        - expression:
+            field: PathInfo
+            operator: matches
+            type: string
+            values:
+            - /post
+        - expression:
+            field: ContentType
+            operator: equals
+            type: string
+            values:
+            - application/json
+      operation: ENRICH
+      phase: REQUEST
+      targets:
+      - body
+      transformer: JSON_PATH
+      transformer_config:
+      - $.card.number

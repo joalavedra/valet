@@ -65,6 +65,134 @@ accepted when exactly one page target exists. The server only allows CDP hosts
 from `VALET_CDP_ALLOW` (default `127.0.0.1,localhost,::1`). Fill statuses are
 `ok`, `need_otp`, `wrong_password`, `captcha`, `host_mismatch`, or `unknown`.
 
+## API credentials via Infisical Agent Vault
+
+`http_call` delegates to an Infisical Agent Vault forward proxy, which
+injects the real credential upstream — the agent (and Valet) never see it.
+
+```bash
+export VALET_AGENTVAULT_PROXY=http://TOKEN:VAULT@127.0.0.1:14322  # forward proxy, token:vault userinfo
+export VALET_AGENTVAULT_ADDR=http://127.0.0.1:14321               # Agent Vault API (for /discover)
+export VALET_AGENTVAULT_TOKEN=<agent-token>
+export VALET_AGENTVAULT_VAULT=<vault-name>                        # optional X-Vault header
+export VALET_AGENTVAULT_CA=/path/to/agent-vault-ca.pem            # optional, for HTTPS upstreams (GET {ADDR}/v1/mitm/ca.pem)
+```
+
+Each Agent Vault service becomes a virtual handle `api://<name>`. Grant it,
+then call:
+
+```bash
+curl -X POST localhost:14400/v1/grants -H "Authorization: Bearer $AGENT" \
+  -d '{"handle":"api://stripe","policy":{"hosts":["api.stripe.com"]},"ttl":600}'
+
+curl -X POST localhost:14400/v1/edge/http/call -H "Authorization: Bearer $AGENT" \
+  -d '{"grant_token":"'$GRANT'","method":"GET","url":"https://api.stripe.com/v1/charges"}'
+```
+
+The request URL host must match the discovered service host; hop-by-hop and
+`Proxy-*` agent headers are stripped, and `Set-Cookie` is never returned.
+
+## Card payments via VGS
+
+`POST /v1/edge/card/pay` sends the merchant's payment API call through VGS's
+outbound proxy — Valet substitutes `{{card.*}}` placeholders with the stored
+aliases, and VGS detokenizes them to real PAN/CVC in transit for hosts that
+have an **Outbound Route** configured in the VGS dashboard.
+
+Env vars: `VGS_VAULT_ID` (the `tnt…` id — required, otherwise the provider
+isn't registered), `VGS_ENV` (default `sandbox`), `VGS_USERNAME`,
+`VGS_PASSWORD` (vault Access Credentials), `VGS_CA_FILE` (path to VGS's
+`sandbox.pem`/`live.pem` — the proxy is reached over TLS on
+`<vault>.<env>.verygoodproxy.com:8443`). The sandbox CA is bundled in the
+binary (and at `deploy/vgs/sandbox.pem`), so `VGS_CA_FILE` is only needed
+for `VGS_ENV=live`.
+
+Operator-side tokenization (no Collect.js needed): `cred add --type card
+--tokenize` prompts for the raw PAN and sends it through the VGS Vault API,
+storing only the returned aliases (CVC, if given, is stored as a 1-hour
+VOLATILE alias). Requires a VGS service account:
+`VGS_CLIENT_ID`/`VGS_CLIENT_SECRET` (Dashboard → Organization settings →
+Service Accounts → Create New, scopes `aliases:write`). Prints only the
+alias's last4. Example outbound route for httpbin.org (reveals
+`$.card.number` in the JSON body): `deploy/vgs/routes/httpbin-echo.yaml` —
+import via the dashboard or `vgs apply`.
+
+Placeholders (stored as credential fields by `cred add --type card`):
+
+| Placeholder | Card field |
+|---|---|
+| `{{card.number}}` | PAN alias |
+| `{{card.exp_month}}` / `{{card.exp_year}}` | expiry |
+| `{{card.holder}}` | cardholder name |
+| `{{card.cvc}}` | CVC alias (VOLATILE, optional — 409 `{"error":"cvc_required","status":"need_cvc"}` if referenced but absent) |
+
+Card grants must be scoped — the policy needs `hosts` or `spend.merchants`
+(otherwise 403 `card grant must restrict merchants`); a `spend` policy also
+requires a positive `amount` (403 `amount required`). Policy:
+`spend.merchants` (glob on the request host), `spend.per_tx` cap;
+`amount`/`currency` are recorded in the audit row.
+
+Response: `{"status","http_status","headers","body","truncated"}` where
+`status` is `ok` (upstream 2xx), `declined` (4xx) or `upstream_error`
+(3xx/5xx). Hop-by-hop and `Proxy-*` request headers are dropped, redirects
+are never followed, the body is capped at 256 KiB, and the response body is
+redacted — stored secret values (number/cvc), Luhn-valid PANs and
+CVC-shaped JSON values never reach the agent.
+
+Verified flow: `--tokenize` a card, give the merchant's host an outbound
+ENRICH route revealing `$.card.number`, then `pay` echoes the real PAN
+upstream and returns `****1111` to the agent. If the route's filters include
+`ContentType`, the agent must pass a matching `Content-Type` in `headers` —
+otherwise the payload bypasses the filter and the alias crosses the proxy
+unrevealed.
+
+## Use from browser-use
+
+`sdks/python` ships a `valet-agent` package with a browser-use adapter:
+
+```bash
+pip install -e 'sdks/python[browser-use]'
+```
+
+```python
+from browser_use import Agent, BrowserSession, ChatOpenAI, Tools
+from valet.browser_use import register_valet_tools
+from valet.client import ValetClient
+
+client = ValetClient()                      # VALET_ADDR + VALET_AGENT_TOKEN
+session = BrowserSession(cdp_url="http://127.0.0.1:9222")
+tools = register_valet_tools(Tools(), client, cdp_url=session.cdp_url)
+agent = Agent(task="Log in via valet_login ...", llm=ChatOpenAI(model="gpt-4o-mini"),
+              browser_session=session, tools=tools)
+```
+
+`valet_login` fills credentials via the browser-fill edge — the agent sees
+only a status string, never the password. See
+`sdks/python/examples/browser-use/login.py`.
+
+## Running under hotdesk / remote-CDP hosts
+
+Agents behind an MCP-over-HTTP proxy or a shared CDP browser (e.g. hotdesk)
+never see devtools websocket URLs. Valet can own both ends:
+
+```bash
+VALET_CDP_URL=http://127.0.0.1:9222 valet server   # default CDP endpoint
+valet mcp --http 127.0.0.1:14401                    # streamable HTTP on /mcp
+```
+
+With `VALET_CDP_URL` set, `browser_fill` may omit `cdp_ws_url`. Agents can
+also pass `page_url` — the URL of the tab to fill — and Valet picks the
+matching page target (exact match, then host+path ignoring query, then a
+unique-host fallback; ambiguous → error). The default endpoint's host must
+still satisfy `VALET_CDP_ALLOW` (loopback by default).
+
+Note: the `--http` transport has no auth of its own — bind loopback or put it
+behind a trusted proxy.
+
+See [deploy/hotdesk](deploy/hotdesk) for a drop-in hotdesk desktop image that
+bundles Valet into `hotdesk-desktop` (supervisor-managed server, credentials
+encrypted in the persistent `/home/cua` volume, MCP via `docker exec`).
+
 ## Dev
 
 ```bash
