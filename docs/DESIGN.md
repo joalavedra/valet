@@ -151,7 +151,7 @@ MCP server (primary) + REST + thin SDKs (TS/Python). Tools:
 | `list_handles()` | handles + metadata (site, label, last4, scopes) | secrets |
 | `request_grant(handle, policy)` | grant_id, status `granted|pending_approval|denied` | — |
 | `http_call(grant, req)` | redacted response | injected headers |
-| `browser_fill(grant_token, cdp_ws_url, mapping{field→selector}, submit?)` | `ok|need_otp|wrong_password|captcha` | typed values |
+| `browser_fill(grant_token, cdp_ws_url, mapping{field→selector}, submit?)` | `ok|need_otp|wrong_password|captcha|host_mismatch|unknown` | typed values |
 | `pay(grant, merchant, amount, rail?)` | receipt / `need_cvc` / `pending_approval` | PAN, VCN (unless rail=vcn and policy allows) |
 
 Framework adapters: browser-use `sensitive_data` shim, OpenHands secrets provider, LangChain tool, OpenAI Agents SDK tool.

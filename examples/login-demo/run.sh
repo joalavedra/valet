@@ -5,7 +5,16 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 VALET=${VALET_BIN:-./valet}
 export VALET_MASTER_PASSWORD=${VALET_MASTER_PASSWORD:-demo-password}
-DB=${VALET_DB:-/tmp/valet-demo.db}
+DEMO_TMP=$(mktemp -d)
+if [ -n "${VALET_DB:-}" ]; then
+  DB=$VALET_DB
+  if [ -e "$DB" ]; then
+    echo "VALET_DB exists; refusing to remove or overwrite: $DB" >&2
+    exit 1
+  fi
+else
+  DB="$DEMO_TMP/valet.db"
+fi
 SITE=the-internet.herokuapp.com
 DEBUG_PORT=9222
 CHROME=${CHROME:-google-chrome}
@@ -16,7 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-rm -f "$DB"
+# The audit bearer is the master password and this demo binds the API to loopback only.
 
 "$VALET" server --db "$DB" &
 SERVER_PID=$!
@@ -55,5 +64,6 @@ curl -s -X POST http://127.0.0.1:14400/v1/edge/browser/fill \
   -d "{\"grant_token\":\"$GRANT\",\"cdp_ws_url\":\"$WS\",\"mapping\":{\"username\":\"#username\",\"password\":\"#password\"},\"submit\":\"button[type=submit]\"}"
 echo
 
+# Loopback-only demo: the master password is the audit bearer.
 curl -s http://127.0.0.1:14400/v1/audit -H "Authorization: Bearer $VALET_MASTER_PASSWORD"
 echo

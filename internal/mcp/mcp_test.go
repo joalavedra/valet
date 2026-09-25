@@ -43,12 +43,12 @@ func TestRequestGrant(t *testing.T) {
 	b := newBackend(t, func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
-		if body["handle"] != "cred://x/y" {
+		if body["handle"] != "cred://x/y" || body["ttl"] != float64(1800) {
 			t.Errorf("bad body %v", body)
 		}
 		json.NewEncoder(w).Encode(map[string]any{"grant_id": "g1", "token": "g1.sig"})
 	})
-	out, err := b.RequestGrant(context.Background(), "cred://x/y", `{"hosts":["x.com"]}`)
+	out, err := b.RequestGrant(context.Background(), "cred://x/y", `{"hosts":["x.com"]}`, "30m")
 	if err != nil {
 		t.Fatal(err)
 	}

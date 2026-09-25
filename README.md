@@ -59,6 +59,12 @@ export VALET_AGENT_TOKEN=<token from agent create>
 
 Working browser-fill demo: [examples/login-demo](examples/login-demo).
 
+Browser-fill accepts a page-level CDP websocket URL such as
+`ws://127.0.0.1:9222/devtools/page/<target-id>`; browser-level URLs are only
+accepted when exactly one page target exists. The server only allows CDP hosts
+from `VALET_CDP_ALLOW` (default `127.0.0.1,localhost,::1`). Fill statuses are
+`ok`, `need_otp`, `wrong_password`, `captcha`, `host_mismatch`, or `unknown`.
+
 ## Dev
 
 ```bash

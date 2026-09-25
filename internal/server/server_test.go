@@ -29,7 +29,7 @@ func (f *fakeFiller) PageURL(ctx context.Context, ws string) (string, error) {
 	return f.pageURL, nil
 }
 
-func (f *fakeFiller) Fill(ctx context.Context, ws string, mapping map[string]string, submit string, values map[string]string) (browser.Result, error) {
+func (f *fakeFiller) Fill(ctx context.Context, ws, expectedHost string, mapping map[string]string, submit string, values map[string]string) (browser.Result, error) {
 	cp := map[string]string{}
 	for k, v := range values {
 		cp[k] = v
@@ -163,7 +163,7 @@ func TestBrowserFillHappyPath(t *testing.T) {
 	gtok := issueGrant(t, srv, st, tok, `{"hosts":["github.com"]}`, time.Hour)
 	rec, req := fillReq(t, tok, map[string]any{
 		"grant_token": gtok,
-		"cdp_ws_url":  "ws://x",
+		"cdp_ws_url":  "ws://127.0.0.1:9222",
 		"mapping":     map[string]string{"username": "#u", "password": "#p", "otp": "#otp"},
 		"submit":      "#go",
 	})
@@ -202,7 +202,7 @@ func TestBrowserFillHostDenied(t *testing.T) {
 	srv, st, tok := testServer(t)
 	gtok := issueGrant(t, srv, st, tok, `{"hosts":["allowed.com"]}`, time.Hour)
 	rec, req := fillReq(t, tok, map[string]any{
-		"grant_token": gtok, "cdp_ws_url": "ws://x",
+		"grant_token": gtok, "cdp_ws_url": "ws://127.0.0.1:9222",
 		"mapping": map[string]string{"password": "#p"},
 	})
 	srv.ServeHTTP(rec, req)
@@ -215,11 +215,40 @@ func TestBrowserFillHostDenied(t *testing.T) {
 	}
 }
 
+func TestBrowserFillCDPHostDenied(t *testing.T) {
+	srv, st, tok := testServer(t)
+	gtok := issueGrant(t, srv, st, tok, `{"hosts":["github.com"]}`, time.Hour)
+	rec, req := fillReq(t, tok, map[string]any{"grant_token": gtok, "cdp_ws_url": "ws://evil.example:9222", "mapping": map[string]string{"password": "#p"}})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	last, _ := st.LastAudit()
+	if !strings.Contains(last.Detail, "cdp_host_denied") {
+		t.Fatalf("audit detail %q", last.Detail)
+	}
+}
+
+func TestBrowserFillEmptyPageURL(t *testing.T) {
+	srv, st, tok := testServer(t)
+	srv.filler = &fakeFiller{}
+	gtok := issueGrant(t, srv, st, tok, `{"hosts":["github.com"]}`, time.Hour)
+	rec, req := fillReq(t, tok, map[string]any{"grant_token": gtok, "cdp_ws_url": "ws://127.0.0.1:9222", "mapping": map[string]string{"password": "#p"}})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	last, _ := st.LastAudit()
+	if !strings.Contains(last.Detail, "no_page_url") {
+		t.Fatalf("audit detail %q", last.Detail)
+	}
+}
+
 func TestBrowserFillExpiredGrant(t *testing.T) {
 	srv, st, tok := testServer(t)
 	gtok := issueGrant(t, srv, st, tok, `{"hosts":["github.com"]}`, -time.Hour)
 	rec, req := fillReq(t, tok, map[string]any{
-		"grant_token": gtok, "cdp_ws_url": "ws://x",
+		"grant_token": gtok, "cdp_ws_url": "ws://127.0.0.1:9222",
 		"mapping": map[string]string{"password": "#p"},
 	})
 	srv.ServeHTTP(rec, req)

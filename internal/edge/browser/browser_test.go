@@ -2,6 +2,8 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"os"
 	"testing"
 
@@ -44,7 +46,7 @@ func TestFillIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("page: %s", loc)
-	res, err := f.Fill(context.Background(), ws,
+	res, err := f.Fill(context.Background(), ws, "the-internet.herokuapp.com",
 		map[string]string{"username": "#username", "password": "#password"},
 		"",
 		map[string]string{"username": "u", "password": "p"})
@@ -56,6 +58,30 @@ func TestFillIntegration(t *testing.T) {
 	}
 	if shot := os.Getenv("VALET_SCREENSHOT"); shot != "" {
 		saveScreenshot(t, f, ws, shot)
+	}
+	resp, err := http.Get("http://127.0.0.1:9222/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var targets []struct {
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
+		t.Fatal(err)
+	}
+	pageCount := 0
+	for _, target := range targets {
+		if target.Type == "page" {
+			pageCount++
+		}
+	}
+	if pageCount == 0 {
+		t.Fatal("page target disappeared after fill")
+	}
+	res, err = f.Fill(context.Background(), ws, "the-internet.herokuapp.com", map[string]string{"username": "#username", "password": "#password"}, "", map[string]string{"username": "u2", "password": "p2"})
+	if err != nil || res.Status != StatusOK {
+		t.Fatalf("second fill: %v %+v", err, res)
 	}
 }
 
@@ -71,6 +97,27 @@ func saveScreenshot(t *testing.T, f *CDPFiller, ws, path string) {
 	}
 	if err := os.WriteFile(path, png, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClassifyOutcome(t *testing.T) {
+	tests := []struct {
+		name                   string
+		before, after          string
+		password, otp, captcha bool
+		text, want             string
+	}{
+		{"redirect", "/login", "/home", true, false, false, "", StatusOK},
+		{"password gone", "/login", "/login", false, false, false, "", StatusOK},
+		{"otp", "/login", "/login", true, true, false, "", StatusNeedOTP},
+		{"captcha", "/login", "/login", true, false, true, "", StatusCaptcha},
+		{"wrong", "/login", "/login", true, false, false, "Invalid username or password", StatusWrongPassword},
+		{"unknown", "/login", "/login", true, false, false, "Welcome", StatusUnknown},
+	}
+	for _, tc := range tests {
+		if got := classifyOutcome(tc.before, tc.after, tc.password, tc.otp, tc.captcha, tc.text); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

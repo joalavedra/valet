@@ -18,7 +18,7 @@ import (
 // Backend is the control-plane surface the tools call through.
 type Backend interface {
 	ListHandles(ctx context.Context) (any, error)
-	RequestGrant(ctx context.Context, handle string, policyJSON string) (any, error)
+	RequestGrant(ctx context.Context, handle string, policyJSON string, ttl string) (any, error)
 	BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string) (any, error)
 	Pay(ctx context.Context, grant, merchant string, amount int64, currency, rail string) (any, error)
 }
@@ -93,7 +93,7 @@ func (b *HTTPBackend) ListHandles(ctx context.Context) (any, error) {
 }
 
 // RequestGrant requests a grant for handle under the given JSON policy.
-func (b *HTTPBackend) RequestGrant(ctx context.Context, handle, policyJSON string) (any, error) {
+func (b *HTTPBackend) RequestGrant(ctx context.Context, handle, policyJSON, ttl string) (any, error) {
 	var pol any
 	if policyJSON != "" {
 		if err := json.Unmarshal([]byte(policyJSON), &pol); err != nil {
@@ -101,7 +101,15 @@ func (b *HTTPBackend) RequestGrant(ctx context.Context, handle, policyJSON strin
 		}
 	}
 	var out any
-	err := b.call(ctx, "POST", "/v1/grants", map[string]any{"handle": handle, "policy": pol}, &out)
+	body := map[string]any{"handle": handle, "policy": pol}
+	if ttl != "" {
+		d, err := time.ParseDuration(ttl)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ttl: %w", err)
+		}
+		body["ttl"] = int64(d / time.Second)
+	}
+	err := b.call(ctx, "POST", "/v1/grants", body, &out)
 	return out, err
 }
 
@@ -128,6 +136,7 @@ type listHandlesArgs struct{}
 type requestGrantArgs struct {
 	Handle string `json:"handle" jsonschema:"handle URI, e.g. cred://github.com/joan"`
 	Policy string `json:"policy" jsonschema:"JSON policy object"`
+	TTL    string `json:"ttl,omitempty" jsonschema:"duration such as 30m or 2h"`
 }
 
 type httpCallArgs struct {
@@ -170,7 +179,7 @@ func New(b Backend) *mcp.Server {
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "request_grant", Description: "Request a grant to use a handle under a policy."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args requestGrantArgs) (*mcp.CallToolResult, any, error) {
-			return result(b.RequestGrant(ctx, args.Handle, args.Policy))
+			return result(b.RequestGrant(ctx, args.Handle, args.Policy, args.TTL))
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "http_call", Description: "Make an authenticated HTTP call through the egress edge (delegated to Infisical Agent Vault in Phase 1)."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args httpCallArgs) (*mcp.CallToolResult, any, error) {
