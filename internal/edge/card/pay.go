@@ -142,6 +142,14 @@ func redact(body string, fields map[string]string) string {
 // and redacted of any card material that leaks back.
 // Errors never include the request or response body.
 func Do(ctx context.Context, p Provider, req PayRequest, fields map[string]string) (*Response, error) {
+	// Only secrets get verbatim redaction; non-secret fields like expiry or
+	// holder would over-redact ordinary response text (e.g. "2030").
+	secrets := map[string]string{}
+	for _, k := range []string{"number", "cvc", "alias"} {
+		if v := fields[k]; v != "" {
+			secrets[k] = v
+		}
+	}
 	tr, err := p.Transport()
 	if err != nil {
 		return nil, err
@@ -189,9 +197,9 @@ func Do(ctx context.Context, p Provider, req PayRequest, fields map[string]strin
 	if err != nil {
 		return nil, fmt.Errorf("pay read failed")
 	}
-	out := &Response{Status: resp.StatusCode, Headers: map[string]string{}, Body: redact(string(raw), fields)}
+	out := &Response{Status: resp.StatusCode, Headers: map[string]string{}, Body: redact(string(raw), secrets)}
 	if len(raw) > maxPayBody {
-		out.Body = redact(string(raw[:maxPayBody]), fields)
+		out.Body = redact(string(raw[:maxPayBody]), secrets)
 		out.Truncated = true
 	}
 	for k, vv := range resp.Header {

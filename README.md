@@ -136,8 +136,15 @@ Response: `{"status","http_status","headers","body","truncated"}` where
 `status` is `ok` (upstream 2xx), `declined` (4xx) or `upstream_error`
 (3xx/5xx). Hop-by-hop and `Proxy-*` request headers are dropped, redirects
 are never followed, the body is capped at 256 KiB, and the response body is
-redacted — stored field values, Luhn-valid PANs and CVC-shaped JSON values
-never reach the agent.
+redacted — stored secret values (number/cvc), Luhn-valid PANs and
+CVC-shaped JSON values never reach the agent.
+
+Verified flow: `--tokenize` a card, give the merchant's host an outbound
+ENRICH route revealing `$.card.number`, then `pay` echoes the real PAN
+upstream and returns `****1111` to the agent. If the route's filters include
+`ContentType`, the agent must pass a matching `Content-Type` in `headers` —
+otherwise the payload bypasses the filter and the alias crosses the proxy
+unrevealed.
 
 ## Use from browser-use
 

@@ -273,3 +273,25 @@ func TestVGSTokenizeMissingCreds(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestDoKeepsNonSecretFields(t *testing.T) {
+	fields := map[string]string{
+		"number": "4111111111111111", "cvc": "tok_cvc", "exp_year": "2030",
+		"exp_month": "12", "holder": "Jane Tester",
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"exp":"2030","holder":"Jane Tester","pan":"4111111111111111","cvv":"tok_cvc"}`)
+	}))
+	defer upstream.Close()
+	res, err := Do(context.Background(), staticProvider{rt: http.DefaultTransport},
+		PayRequest{Method: "GET", URL: upstream.URL}, fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Body, `"exp":"2030"`) || !strings.Contains(res.Body, "Jane Tester") {
+		t.Fatalf("non-secret fields redacted: %s", res.Body)
+	}
+	if strings.Contains(res.Body, "4111111111111111") || strings.Contains(res.Body, "tok_cvc") {
+		t.Fatalf("secrets leaked: %s", res.Body)
+	}
+}
