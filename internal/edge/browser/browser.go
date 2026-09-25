@@ -285,20 +285,19 @@ func (f *CDPFiller) Fill(ctx context.Context, ws, expectedHost string, mapping m
 			return Result{Status: StatusUnknown}, fmt.Errorf("missing value for field %q", field)
 		}
 		sel := mapping[field]
-		// Set the field value in-page: Input.insertText depends on focus
-		// and synthesized events, which are unreliable in headless Chrome.
-		// Value assignment plus input/change events works for plain and
-		// framework-managed fields alike.
-		js := fmt.Sprintf(`(function(){var e=document.querySelector(%q); if(!e) return 'no field'; e.value=%q; e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'ok'})()`, sel, val)
+		// chromedp.SetValue passes the value as a typed runtime.CallFunctionOn
+		// argument (no string interpolation into script source) and its
+		// embedded setAttribute.js dispatches input+change events.
 		actions = append(actions,
 			chromedp.WaitVisible(sel, chromedp.ByQuery),
-			chromedp.Evaluate(js, nil))
+			chromedp.SetValue(sel, val, chromedp.ByQuery))
 	}
 	if submit != "" {
 		// A DOM click() is used rather than Input.dispatchMouseEvent: in
 		// headless Chrome the synthesized click does not reliably reach
 		// submit buttons.
-		actions = append(actions, chromedp.Evaluate(fmt.Sprintf(`document.querySelector(%q) && document.querySelector(%q).click()`, submit, submit), nil))
+		selJSON, _ := json.Marshal(submit)
+		actions = append(actions, chromedp.Evaluate(fmt.Sprintf(`var e = document.querySelector(%s); if (e) e.click()`, selJSON), nil))
 	}
 	if err := chromedp.Run(deadline, actions...); err != nil {
 		return res, err
