@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# valet-hotdesk — host-side helper for the Valet-bundled hotdesk desktop image.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+usage() {
+  cat <<'EOF'
+usage:
+  valet-hotdesk build [BASE_IMAGE] [TAG]     build the valet-bundled desktop image
+  valet-hotdesk exec <workspace> <args...>   run a valet CLI command inside the desktop
+  valet-hotdesk mcp <workspace>              run valet's MCP server (stdio) in the desktop
+
+container name: ${HOTDESK_PROJECT:-hotdesk}-desktop-<workspace>-1
+EOF
+}
+
+container() {
+  echo "${HOTDESK_PROJECT:-hotdesk}-desktop-${1:?workspace name required}-1"
+}
+
+case "${1:-}" in
+  build)
+    base="${2:-hotdesk-desktop:latest}"
+    tag="${3:-hotdesk-desktop-valet:latest}"
+    docker build -f "$REPO_ROOT/deploy/hotdesk/Dockerfile" \
+      --build-arg "BASE=$base" -t "$tag" "$REPO_ROOT"
+    ;;
+  exec)
+    shift
+    ws="$1"; shift
+    docker exec -i -u cua "$(container "$ws")" /usr/local/bin/valet-start.sh cli "$@"
+    ;;
+  mcp)
+    shift
+    docker exec -i -u cua -e "VALET_AGENT_TOKEN=${VALET_AGENT_TOKEN:?set VALET_AGENT_TOKEN}" \
+      "$(container "$ws")" /usr/local/bin/valet mcp
+    ;;
+  ""|-h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

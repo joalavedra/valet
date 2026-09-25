@@ -135,6 +135,10 @@ still satisfy `VALET_CDP_ALLOW` (loopback by default).
 Note: the `--http` transport has no auth of its own — bind loopback or put it
 behind a trusted proxy.
 
+See [deploy/hotdesk](deploy/hotdesk) for a drop-in hotdesk desktop image that
+bundles Valet into `hotdesk-desktop` (supervisor-managed server, credentials
+encrypted in the persistent `/home/cua` volume, MCP via `docker exec`).
+
 ## Dev
 
 ```bash
