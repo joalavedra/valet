@@ -66,6 +66,11 @@ def register_valet_tools(tools: "Tools", client: ValetClient, *, cdp_url: str | 
             status = res.get("status", "unknown")
             if status != "ok":
                 return ActionResult(error=f"valet_login status={status}")
+            if submit is None:
+                return ActionResult(
+                    extracted_content=f"valet_login status={status}; fields filled, form NOT submitted — submit it yourself",
+                    long_term_memory=f"Fields filled via Valet on {host} (status={status}); form not submitted — submit it yourself. Credentials were typed by Valet, never returned.",
+                )
             return ActionResult(
                 extracted_content=f"valet_login status={status}",
                 long_term_memory=f"Logged in via Valet on {host} (status={status}); credentials were typed by Valet, never returned.",
@@ -73,6 +78,9 @@ def register_valet_tools(tools: "Tools", client: ValetClient, *, cdp_url: str | 
         except ValetError as e:
             return ActionResult(error=str(e))
         except Exception as e:
-            return ActionResult(error=f"valet_login failed: {e}")
+            msg = str(e)
+            if client.token:
+                msg = msg.replace(client.token, "[redacted]")
+            return ActionResult(error=f"valet_login failed: {msg}")
 
     return tools

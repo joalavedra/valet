@@ -7,7 +7,7 @@ TOKEN = "vlt_secret"
 
 
 def make_client(handler):
-    c = ValetClient("http://valet.test", token=TOKEN)
+    c = ValetClient("https://valet.test", token=TOKEN)
     c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="")
     return c
 

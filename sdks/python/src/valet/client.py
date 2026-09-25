@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -33,8 +34,17 @@ class ValetError(Exception):
 
 
 class ValetClient:
-    def __init__(self, base_url: str | None = None, token: str | None = None, timeout: float = 30.0):
+    def __init__(self, base_url: str | None = None, token: str | None = None, timeout: float = 90.0):
         self.base_url = (base_url or os.environ.get("VALET_ADDR") or "http://127.0.0.1:14400").rstrip("/")
+        u = urlparse(self.base_url)
+        if (
+            u.scheme == "http"
+            and u.hostname not in {"127.0.0.1", "localhost", "::1"}
+            and os.environ.get("VALET_ALLOW_INSECURE") != "1"
+        ):
+            raise ValueError(
+                "VALET_ADDR uses plain http to a non-loopback host; use https or set VALET_ALLOW_INSECURE=1"
+            )
         self.token = token or os.environ.get("VALET_AGENT_TOKEN")
         self._http = httpx.AsyncClient(timeout=timeout)
 
