@@ -2,6 +2,7 @@ package card
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -178,5 +179,97 @@ func TestDoRedactsResponse(t *testing.T) {
 	}
 	if strings.Contains(res.Body, "tok_live_pan") || strings.Contains(res.Body, "4111111111111111") {
 		t.Fatalf("response not redacted: %s", res.Body)
+	}
+}
+
+func newVGSStub(t *testing.T) *VGS {
+	t.Helper()
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		if r.Form.Get("grant_type") != "client_credentials" {
+			t.Errorf("grant_type=%q", r.Form.Get("grant_type"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"access_token":"tok_test"}`)
+	}))
+	vault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/aliases" {
+			t.Errorf("path=%s", r.URL.Path)
+		}
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			t.Error("missing bearer")
+		}
+		var req struct {
+			Data []struct {
+				Value   string   `json:"value"`
+				Format  string   `json:"format"`
+				Storage string   `json:"storage"`
+				Classes []string `json:"classifiers"`
+			} `json:"data"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		var resp struct {
+			Data []map[string]any `json:"data"`
+		}
+		for i, d := range req.Data {
+			resp.Data = append(resp.Data, map[string]any{
+				"value":   nil,
+				"aliases": []map[string]string{{"alias": fmt.Sprintf("alias_%d", i), "format": d.Format}},
+			})
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(func() { auth.Close(); vault.Close() })
+	return &VGS{ClientID: "id", ClientSecret: "sec", authURL: auth.URL, vaultAPIURL: vault.URL}
+}
+
+func TestVGSTokenizeHappy(t *testing.T) {
+	v := newVGSStub(t)
+	aliases, err := v.Tokenize(context.Background(), []TokenizeInput{
+		{Value: "4111111111111111", Format: "FPE_SIX_T_FOUR"},
+		{Value: "123", Format: "NUM_LENGTH_PRESERVING", Volatile: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aliases) != 2 || aliases[0] != "alias_0" || aliases[1] != "alias_1" {
+		t.Fatalf("aliases=%v", aliases)
+	}
+}
+
+func TestVGSTokenizeAuthFail(t *testing.T) {
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+	}))
+	defer auth.Close()
+	v := &VGS{ClientID: "id", ClientSecret: "sec", authURL: auth.URL, vaultAPIURL: "unused"}
+	_, err := v.Tokenize(context.Background(), []TokenizeInput{{Value: "4111111111111111"}})
+	if err == nil || strings.Contains(err.Error(), "4111") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestVGSTokenizeNon2xx(t *testing.T) {
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"access_token":"t"}`)
+	}))
+	vault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer auth.Close()
+	defer vault.Close()
+	v := &VGS{ClientID: "id", ClientSecret: "sec", authURL: auth.URL, vaultAPIURL: vault.URL}
+	_, err := v.Tokenize(context.Background(), []TokenizeInput{{Value: "4111111111111111"}})
+	if err == nil || !strings.Contains(err.Error(), "status 500") || strings.Contains(err.Error(), "4111") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestVGSTokenizeMissingCreds(t *testing.T) {
+	_, err := (&VGS{}).Tokenize(context.Background(), []TokenizeInput{{Value: "x"}})
+	if err == nil || !strings.Contains(err.Error(), "VGS_CLIENT_ID") {
+		t.Fatalf("err=%v", err)
 	}
 }

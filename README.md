@@ -107,6 +107,16 @@ isn't registered), `VGS_ENV` (default `sandbox`), `VGS_USERNAME`,
 binary (and at `deploy/vgs/sandbox.pem`), so `VGS_CA_FILE` is only needed
 for `VGS_ENV=live`.
 
+Operator-side tokenization (no Collect.js needed): `cred add --type card
+--tokenize` prompts for the raw PAN and sends it through the VGS Vault API,
+storing only the returned aliases (CVC, if given, is stored as a 1-hour
+VOLATILE alias). Requires a VGS service account:
+`VGS_CLIENT_ID`/`VGS_CLIENT_SECRET` (Dashboard → Organization settings →
+Service Accounts → Create New, scopes `aliases:write`). Prints only the
+alias's last4. Example outbound route for httpbin.org (reveals
+`$.card.number` in the JSON body): `deploy/vgs/routes/httpbin-echo.yaml` —
+import via the dashboard or `vgs apply`.
+
 Placeholders (stored as credential fields by `cred add --type card`):
 
 | Placeholder | Card field |
