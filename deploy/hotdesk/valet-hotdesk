@@ -34,6 +34,7 @@ case "${1:-}" in
     ;;
   mcp)
     shift
+    ws="${1:?workspace name required}"
     docker exec -i -u cua -e "VALET_AGENT_TOKEN=${VALET_AGENT_TOKEN:?set VALET_AGENT_TOKEN}" \
       "$(container "$ws")" /usr/local/bin/valet mcp
     ;;
