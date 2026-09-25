@@ -43,8 +43,12 @@ var serverCmd = &cobra.Command{
 		}
 		srv := server.New(st, iss, audit.New(st), &browser.CDPFiller{}, dek, eg)
 		srv.SetCDPDefault(os.Getenv("VALET_CDP_URL"))
-		fmt.Println("valet server listening on :14400")
-		return http.ListenAndServe(":14400", srv)
+		listen := os.Getenv("VALET_LISTEN")
+		if listen == "" {
+			listen = ":14400"
+		}
+		fmt.Println("valet server listening on", listen)
+		return http.ListenAndServe(listen, srv)
 	},
 }
 
@@ -95,6 +99,10 @@ func loadDEK(st store.Store) ([]byte, error) {
 
 func init() {
 	home, _ := os.UserHomeDir()
-	rootCmd.PersistentFlags().StringVar(&serverDB, "db", filepath.Join(home, ".valet", "valet.db"), "path to SQLite database")
+	defaultDB := os.Getenv("VALET_DB")
+	if defaultDB == "" {
+		defaultDB = filepath.Join(home, ".valet", "valet.db")
+	}
+	rootCmd.PersistentFlags().StringVar(&serverDB, "db", defaultDB, "path to SQLite database (default $VALET_DB or ~/.valet/valet.db)")
 	rootCmd.AddCommand(serverCmd)
 }
