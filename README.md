@@ -40,6 +40,20 @@
    Third-party API / website                         Merchant checkout / PSP
 ```
 
+## Install
+
+Prebuilt binaries for Linux, macOS, and Windows are on the
+[GitHub Releases](https://github.com/joalavedra/valet/releases) page.
+
+```bash
+# Docker (server on :14400, data in a named volume)
+docker run -d -v valet-data:/data -p 14400:14400 \
+  -e VALET_MASTER_PASSWORD=changeme ghcr.io/joalavedra/valet:latest
+
+# or build from source with Go ≥ 1.26
+go install github.com/joalavedra/valet@latest
+```
+
 ## Quickstart
 
 ```bash

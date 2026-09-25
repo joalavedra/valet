@@ -1,0 +1,71 @@
+version: 2
+
+project_name: valet
+
+builds:
+  - id: valet
+    main: .
+    binary: valet
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - name_template: "valet_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - docs/**
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: git
+
+dockers:
+  - image_templates:
+      - "ghcr.io/joalavedra/valet:{{ .Version }}-amd64"
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source=https://github.com/joalavedra/valet"
+    goos: linux
+    goarch: amd64
+    ids: [valet]
+    extra_files:
+      - Dockerfile.goreleaser
+  - image_templates:
+      - "ghcr.io/joalavedra/valet:{{ .Version }}-arm64"
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/joalavedra/valet"
+    goos: linux
+    goarch: arm64
+    ids: [valet]
+    extra_files:
+      - Dockerfile.goreleaser
+
+docker_manifests:
+  - name_template: "ghcr.io/joalavedra/valet:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/joalavedra/valet:{{ .Version }}-amd64"
+      - "ghcr.io/joalavedra/valet:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/joalavedra/valet:latest"
+    image_templates:
+      - "ghcr.io/joalavedra/valet:{{ .Version }}-amd64"
+      - "ghcr.io/joalavedra/valet:{{ .Version }}-arm64"
