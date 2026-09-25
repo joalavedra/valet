@@ -61,6 +61,9 @@ func deny(reason string) Decision { return Decision{Allow: false, Reason: reason
 
 var allow = Decision{Allow: true, Reason: "ok"}
 
+// GlobMatch reports whether value matches a host/path glob pattern.
+func GlobMatch(pattern, value string) bool { return globMatch(pattern, value) }
+
 func globMatch(pattern, value string) bool {
 	if pattern == "*" {
 		return true

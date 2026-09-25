@@ -12,6 +12,7 @@ import (
 	"github.com/joalavedra/valet/internal/audit"
 	"github.com/joalavedra/valet/internal/crypto"
 	"github.com/joalavedra/valet/internal/edge/browser"
+	"github.com/joalavedra/valet/internal/edge/egress"
 	"github.com/joalavedra/valet/internal/grant"
 	"github.com/joalavedra/valet/internal/server"
 	"github.com/joalavedra/valet/internal/store"
@@ -33,7 +34,14 @@ var serverCmd = &cobra.Command{
 			return err
 		}
 		iss := grant.NewIssuer(st, dek)
-		srv := server.New(st, iss, audit.New(st), &browser.CDPFiller{}, dek)
+		var eg *egress.Client
+		if cfg, ok := egress.FromEnv(); ok {
+			eg, err = egress.New(cfg)
+			if err != nil {
+				return err
+			}
+		}
+		srv := server.New(st, iss, audit.New(st), &browser.CDPFiller{}, dek, eg)
 		fmt.Println("valet server listening on :14400")
 		return http.ListenAndServe(":14400", srv)
 	},

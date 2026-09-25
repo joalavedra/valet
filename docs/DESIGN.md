@@ -195,6 +195,8 @@ What it does **not** do (verified in repo): browser/CDP credential injection, TO
 
 Either way the differentiators that remain open are unchanged: *website logins, card payments (VGS-pattern + virtual cards + x402), and attested execution*. That is a sharper, more defensible scope than "another vault", and it's exactly the part Infisical (a secrets company, not a payments/wallet company) is least likely to build.
 
+**Status (implemented):** option (A). `http_call` is live via `internal/edge/egress`: requests go through the Agent Vault forward proxy (`VALET_AGENTVAULT_PROXY` with `token:vault` userinfo), services from `GET {VALET_AGENTVAULT_ADDR}/discover` become virtual `api://<name>` handles, and grants/policy/audit apply as on the other edges. The CA PEM is served by Agent Vault at `GET /v1/mitm/ca.pem` (`VALET_AGENTVAULT_CA`).
+
 ## 11. Decisions log
 
 | # | Question | Decision (Joan, Sept 2026) |

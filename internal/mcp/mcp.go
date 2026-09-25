@@ -20,6 +20,7 @@ type Backend interface {
 	ListHandles(ctx context.Context) (any, error)
 	RequestGrant(ctx context.Context, handle string, policyJSON string, ttl string) (any, error)
 	BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string) (any, error)
+	HTTPCall(ctx context.Context, grant, method, url, headersJSON, body string) (any, error)
 	Pay(ctx context.Context, grant, merchant string, amount int64, currency, rail string) (any, error)
 }
 
@@ -122,7 +123,21 @@ func (b *HTTPBackend) BrowserFill(ctx context.Context, grant, cdpWSURL string, m
 	return out, err
 }
 
-// Pay asks the card edge to pay merchant.
+// HTTPCall asks the egress edge to perform an authenticated HTTP request.
+func (b *HTTPBackend) HTTPCall(ctx context.Context, grant, method, url, headersJSON, body string) (any, error) {
+	payload := map[string]any{"grant_token": grant, "method": method, "url": url, "body": body}
+	if headersJSON != "" {
+		var h map[string]string
+		if err := json.Unmarshal([]byte(headersJSON), &h); err != nil {
+			return nil, fmt.Errorf("invalid headers json: %w", err)
+		}
+		payload["headers"] = h
+	}
+	var out any
+	err := b.call(ctx, "POST", "/v1/edge/http/call", payload, &out)
+	return out, err
+}
+
 func (b *HTTPBackend) Pay(ctx context.Context, grant, merchant string, amount int64, currency, rail string) (any, error) {
 	var out any
 	err := b.call(ctx, "POST", "/v1/edge/card/pay", map[string]any{
@@ -181,9 +196,9 @@ func New(b Backend) *mcp.Server {
 		func(ctx context.Context, req *mcp.CallToolRequest, args requestGrantArgs) (*mcp.CallToolResult, any, error) {
 			return result(b.RequestGrant(ctx, args.Handle, args.Policy, args.TTL))
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "http_call", Description: "Make an authenticated HTTP call through the egress edge (delegated to Infisical Agent Vault in Phase 1)."},
+	mcp.AddTool(s, &mcp.Tool{Name: "http_call", Description: "Authenticated HTTP call via the egress edge (Infisical Agent Vault injects the credential; the agent never sees it)"},
 		func(ctx context.Context, req *mcp.CallToolRequest, args httpCallArgs) (*mcp.CallToolResult, any, error) {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "not_implemented"}}, IsError: true}, nil, nil
+			return result(b.HTTPCall(ctx, args.Grant, args.Method, args.URL, args.Headers, args.Body))
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "browser_fill", Description: "Fill login form fields in the agent's browser via CDP. Returns status only, never typed values."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args browserFillArgs) (*mcp.CallToolResult, any, error) {
