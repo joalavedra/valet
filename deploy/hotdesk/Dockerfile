@@ -23,10 +23,11 @@ RUN apk add --no-cache curl \
        | tar -xz -C /tmp valet \
     && mkdir -p /out && mv /tmp/valet /out/valet && chmod 755 /out/valet
 
+FROM ${VALET_SRC} AS binsrc
+
 FROM ${BASE}
-ARG VALET_SRC
 USER root
-COPY --from=${VALET_SRC} /out/valet /usr/local/bin/valet
+COPY --from=binsrc /out/valet /usr/local/bin/valet
 COPY deploy/hotdesk/valet-start.sh /usr/local/bin/valet-start.sh
 COPY deploy/hotdesk/supervisor.conf /tmp/valet-supervisor.conf
 RUN chmod 755 /usr/local/bin/valet /usr/local/bin/valet-start.sh \
