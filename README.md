@@ -157,10 +157,13 @@ valet card capture --label visa-4242 --ttl 15m
 ```
 
 Prerequisite: one **Inbound Route** in the vault whose upstream is
-`https://<vault-id>.<env>.vault-api.verygoodvault.com` — Collect.js
+`https://api.<env>.verygoodvault.com` (the Vault API **v1** upstream that
+Collect's `tokenize()` targets — *not* `vault-api.verygoodvault.com`,
+which is v2/`createAliases` and rejects the CORS preflight) — Collect.js
 `tokenize()` posts through the vault's inbound proxy and fails with
 "Network Error" if no inbound route covers it. No `setRouteId` needed —
-a single inbound route is matched by host.
+a single inbound route is matched by host. If preflights still fail,
+enable **Intercept CORS** in Vault Settings → Advanced.
 
 `GET /capture/<token>` renders an embedded page that loads VGS Collect.js
 3.4.0 (hosted iframes for number + CVC; expiry/holder are plain inputs) and
