@@ -179,7 +179,7 @@ var respHeaders = map[string]bool{
 
 var (
 	secretKVRE = regexp.MustCompile(
-		`(?i)("(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|secret[_-]?key|private[_-]?key|password|passwd|authorization|x-api-key|token|secret)"\s*:\s*")([^"]{8,})(")`)
+		`(?i)("(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|secret[_-]?key|private[_-]?key|password|passwd|authorization|x-api-key|token|secret)"\s*:\s*")((?:[^"\\]|\\.){8,})(")`)
 	bearerRE   = regexp.MustCompile(`(?i)\bBearer\s+([A-Za-z0-9\-._~+/]+=*)`)
 	keyShapeRE = regexp.MustCompile(
 		`sk-[A-Za-z0-9_-]{16,}|sk_(live|test)_[A-Za-z0-9]{8,}|rk_(live|test)_[A-Za-z0-9]{8,}|` +
@@ -249,10 +249,17 @@ func (c *Client) Do(ctx context.Context, in Request) (*Response, error) {
 	for k, vv := range resp.Header {
 		lk := strings.ToLower(k)
 		if respHeaders[lk] || strings.HasPrefix(lk, "x-ratelimit-") {
-			if out.Truncated && lk == "content-length" {
-				continue
+			v, changed := RedactSecrets(strings.Join(vv, ", "))
+			out.Redacted = out.Redacted || changed
+			out.Headers[k] = v
+		}
+	}
+	// A truncated or redacted body no longer matches the upstream length.
+	if out.Truncated || out.Redacted {
+		for k := range out.Headers {
+			if strings.ToLower(k) == "content-length" {
+				delete(out.Headers, k)
 			}
-			out.Headers[k] = strings.Join(vv, ", ")
 		}
 	}
 	return out, nil
