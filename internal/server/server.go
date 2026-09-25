@@ -201,6 +201,8 @@ type captureCompleteRequest struct {
 var tokAliasRE = regexp.MustCompile(`^tok_[A-Za-z0-9_]+$`)
 var cvcAliasRE = regexp.MustCompile(`^(tok_[A-Za-z0-9_]+|\d{3,4})$`)
 var binRE = regexp.MustCompile(`^\d{6,8}$`)
+var last4RE = regexp.MustCompile(`^\d{4}$`)
+var yearRE = regexp.MustCompile(`^\d{4}$`)
 
 func luhnPan(s string) bool {
 	var digits []byte
@@ -243,10 +245,9 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	// Number must be a UUID-format alias (tok_…) — raw PANs and
-	// format-preserving aliases (themselves Luhn-valid) are rejected.
-	// CVC aliases may be tok_ or a 3–4 digit length-preserving alias;
-	// digits that short can't be a PAN.
+	// Number must be a UUID-format alias (tok_…); format-preserving aliases
+	// are Luhn-valid and indistinguishable from a PAN. CVC aliases are tok_ or
+	// a 3–4 digit length-preserving alias, too short to be a PAN.
 	if !tokAliasRE.MatchString(req.Number) || luhnPan(req.Number) ||
 		(req.CVC != "" && !cvcAliasRE.MatchString(req.CVC)) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "raw card data rejected"})
@@ -257,7 +258,7 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad exp_month"})
 		return
 	}
-	if !regexp.MustCompile(`^\d{4}$`).MatchString(req.ExpYear) {
+	if !yearRE.MatchString(req.ExpYear) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad exp_year"})
 		return
 	}
@@ -272,11 +273,10 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 	if req.CVC != "" {
 		fields["cvc"] = req.CVC
 	}
-	last4 := req.Last4
-	if last4 == "" && len(req.Number) >= 4 {
-		last4 = req.Number[len(req.Number)-4:]
+	metaMap := map[string]string{"provider": "vgs", "source": "collect"}
+	if last4RE.MatchString(req.Last4) {
+		metaMap["last4"] = req.Last4
 	}
-	metaMap := map[string]string{"provider": "vgs", "last4": last4, "source": "collect"}
 	if binRE.MatchString(req.Bin) {
 		metaMap["bin"] = req.Bin
 	}
