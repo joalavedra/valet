@@ -1,0 +1,9 @@
+# Used by .goreleaser.yaml — packages the prebuilt binary (built per-arch)
+# onto the same distroless runtime as the root Dockerfile.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY valet /valet
+ENV VALET_DB=/data/valet.db VALET_LISTEN=:14400
+VOLUME /data
+EXPOSE 14400
+ENTRYPOINT ["/valet"]
+CMD ["server"]

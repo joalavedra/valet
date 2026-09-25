@@ -3,6 +3,9 @@ package main
 
 import "github.com/joalavedra/valet/cmd"
 
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
-	cmd.Execute()
+	cmd.Execute(version)
 }

@@ -15,5 +15,8 @@ lint: vet
 fmt:
 	gofmt -w .
 
+release-snapshot:
+	goreleaser release --snapshot --clean
+
 clean:
 	rm -f valet coverage.out

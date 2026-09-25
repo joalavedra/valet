@@ -18,6 +18,16 @@ docker build -t hotdesk-desktop:dev --build-arg HOTDESK_VERSION=dev desktop/
 valet-hotdesk build hotdesk-desktop:dev hotdesk-desktop-valet:dev
 ```
 
+By default the Dockerfile builds valet from this repo's source. To bundle a
+published release instead (no Go toolchain stage):
+
+```bash
+docker build -f deploy/hotdesk/Dockerfile \
+  --build-arg BASE=hotdesk-desktop:dev \
+  --build-arg VALET_SRC=release --build-arg VALET_VERSION=0.1.0 \
+  -t hotdesk-desktop-valet:dev .
+```
+
 ## Configure hotdesk
 
 In your workspace's `hotdesk.toml`:
