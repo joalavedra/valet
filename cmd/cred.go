@@ -18,7 +18,7 @@ import (
 	"github.com/joalavedra/valet/internal/store"
 )
 
-var credAddType, credAddLabel, credAddSite string
+var credAddType, credAddLabel, credAddSite, credAddLast4 string
 
 var stdinReader = bufio.NewReader(os.Stdin)
 
@@ -66,7 +66,10 @@ var credAddCmd = &cobra.Command{
 		case "api_key":
 			prompts = []string{"key"}
 		case "card":
-			prompts = []string{"alias"}
+			prompts = []string{"number (alias)", "exp_month", "exp_year", "holder", "cvc (optional)"}
+		}
+		fieldName := func(prompt string) string {
+			return strings.Split(prompt, " ")[0]
 		}
 		for _, f := range prompts {
 			v, err := promptSecret(f)
@@ -74,8 +77,13 @@ var credAddCmd = &cobra.Command{
 				return err
 			}
 			if v != "" {
-				fields[f] = v
+				fields[fieldName(f)] = v
 			}
+		}
+		metadata := "{}"
+		if credAddType == "card" {
+			meta, _ := json.Marshal(map[string]string{"provider": "vgs", "last4": credAddLast4})
+			metadata = string(meta)
 		}
 		pt, _ := json.Marshal(fields)
 		ct, err := crypto.Encrypt(dek, pt)
@@ -84,7 +92,7 @@ var credAddCmd = &cobra.Command{
 		}
 		return st.AddCredential(&store.Credential{
 			Handle: h.String(), Type: credAddType, Site: credAddSite, Label: credAddLabel,
-			Metadata: "{}", Ciphertext: ct,
+			Metadata: metadata, Ciphertext: ct,
 		})
 	},
 }
@@ -141,6 +149,7 @@ func init() {
 	credAddCmd.Flags().StringVar(&credAddType, "type", "", "login | api_key | card")
 	credAddCmd.Flags().StringVar(&credAddLabel, "label", "", "credential label")
 	credAddCmd.Flags().StringVar(&credAddSite, "site", "", "site/domain the credential is for")
+	credAddCmd.Flags().StringVar(&credAddLast4, "last4", "", "last four digits (card only, recorded in metadata)")
 	credAddCmd.MarkFlagRequired("type")
 	credAddCmd.MarkFlagRequired("label")
 	credCmd.AddCommand(credAddCmd, credListCmd)

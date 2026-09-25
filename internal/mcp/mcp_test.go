@@ -97,7 +97,7 @@ func TestPay(t *testing.T) {
 		w.WriteHeader(http.StatusNotImplemented)
 		w.Write([]byte(`{"status":"not_implemented"}`))
 	})
-	_, err := b.Pay(context.Background(), "g.sig", "shop.com", 500, "USD", "")
+	_, err := b.Pay(context.Background(), "g.sig", "https://shop.com/charge", "POST", nil, `{"pan":"{{card.number}}"}`, 500, "USD")
 	if err == nil || !strings.Contains(err.Error(), "501") {
 		t.Fatalf("want 501 error, got %v", err)
 	}
@@ -147,7 +147,7 @@ func (stubBackend) BrowserFill(ctx context.Context, grant, cdpWSURL string, mapp
 func (stubBackend) HTTPCall(ctx context.Context, grant, method, url, headersJSON, body string) (any, error) {
 	return nil, nil
 }
-func (stubBackend) Pay(ctx context.Context, grant, merchant string, amount int64, currency, rail string) (any, error) {
+func (stubBackend) Pay(ctx context.Context, grant, url, method string, headers map[string]string, body string, amount int64, currency string) (any, error) {
 	return nil, nil
 }
 

@@ -118,3 +118,27 @@ class ValetClient:
         if body is not None:
             payload["body"] = body
         return await self._request("POST", "/v1/edge/http/call", payload)
+
+    async def pay(
+        self,
+        grant_token: str,
+        url: str,
+        body: str = "",
+        method: str = "POST",
+        headers: dict[str, str] | None = None,
+        amount: int = 0,
+        currency: str = "",
+    ) -> dict:
+        """Pay at a merchant's payment API via the card vault proxy.
+
+        `body` may contain {{card.number}} {{card.exp_month}} {{card.exp_year}}
+        {{card.cvc}} {{card.holder}} placeholders — Valet substitutes the
+        stored aliases before forwarding. Returns http_status + filtered body.
+        """
+        payload: dict[str, Any] = {
+            "grant_token": grant_token, "url": url, "method": method,
+            "body": body, "amount": amount, "currency": currency,
+        }
+        if headers is not None:
+            payload["headers"] = headers
+        return await self._request("POST", "/v1/edge/card/pay", payload)

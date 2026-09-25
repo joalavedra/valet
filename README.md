@@ -92,6 +92,32 @@ curl -X POST localhost:14400/v1/edge/http/call -H "Authorization: Bearer $AGENT"
 The request URL host must match the discovered service host; hop-by-hop and
 `Proxy-*` agent headers are stripped, and `Set-Cookie` is never returned.
 
+## Card payments via VGS
+
+`POST /v1/edge/card/pay` sends the merchant's payment API call through VGS's
+outbound proxy — Valet substitutes `{{card.*}}` placeholders with the stored
+aliases, and VGS detokenizes them to real PAN/CVC in transit for hosts that
+have an **Outbound Route** configured in the VGS dashboard.
+
+Env vars: `VGS_VAULT_ID` (the `tnt…` id — required, otherwise the provider
+isn't registered), `VGS_ENV` (default `sandbox`), `VGS_USERNAME`,
+`VGS_PASSWORD` (vault Access Credentials), `VGS_CA_FILE` (path to VGS's
+`sandbox.pem`/`live.pem` — the proxy is reached over TLS on
+`<vault>.<env>.verygoodproxy.com:8443`).
+
+Placeholders (stored as credential fields by `cred add --type card`):
+
+| Placeholder | Card field |
+|---|---|
+| `{{card.number}}` | PAN alias |
+| `{{card.exp_month}}` / `{{card.exp_year}}` | expiry |
+| `{{card.holder}}` | cardholder name |
+| `{{card.cvc}}` | CVC alias (VOLATILE, optional — errors "cvc required (step-up)" if referenced but absent) |
+
+Policy: `spend.merchants` (glob on the request host), `spend.per_tx` cap;
+`amount`/`currency` are recorded in the audit row. Redirects are never
+followed and the response body is capped at 256 KiB.
+
 ## Use from browser-use
 
 `sdks/python` ships a `valet-agent` package with a browser-use adapter:

@@ -18,6 +18,7 @@ import (
 	"github.com/joalavedra/valet/internal/audit"
 	"github.com/joalavedra/valet/internal/crypto"
 	"github.com/joalavedra/valet/internal/edge/browser"
+	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
 	"github.com/joalavedra/valet/internal/grant"
 	"github.com/joalavedra/valet/internal/handle"
@@ -35,6 +36,7 @@ type Server struct {
 	dek        []byte
 	cdpAllow   []string
 	cdpDefault string
+	cardProv   card.Provider
 	mux        *http.ServeMux
 }
 
@@ -383,12 +385,25 @@ func (s *Server) credValues(c *store.Credential) (map[string]string, error) {
 }
 
 type payRequest struct {
-	Grant    string `json:"grant"`
-	Merchant string `json:"merchant"`
-	Amount   int64  `json:"amount"`
-	Currency string `json:"currency"`
-	Rail     string `json:"rail,omitempty"`
+	GrantToken string            `json:"grant_token"`
+	URL        string            `json:"url"`
+	Method     string            `json:"method"` // default POST
+	Headers    map[string]string `json:"headers,omitempty"`
+	Body       string            `json:"body"`
+	Amount     int64             `json:"amount"`
+	Currency   string            `json:"currency"`
 }
+
+// cardProvider returns the configured provider or lazily resolves "vgs".
+func (s *Server) cardProvider(name string) (card.Provider, error) {
+	if s.cardProv != nil {
+		return s.cardProv, nil
+	}
+	return card.Get(name)
+}
+
+// SetCardProvider overrides the card-vault provider (used by tests).
+func (s *Server) SetCardProvider(p card.Provider) { s.cardProv = p }
 
 func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent) {
 	var req payRequest
@@ -396,23 +411,94 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
-	g, err := s.issuer.Consume(req.Grant, a.ID)
+	g, err := s.issuer.Verify(req.GrantToken, a.ID)
 	if err != nil {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		s.auditDeny(a.ID, "", "card", "", grantReason(err))
+		writeJSON(w, grantStatus(err), map[string]string{"error": "invalid grant"})
 		return
 	}
+	kind, _, _, err := handle.Parse(g.Handle)
+	if err != nil || kind != "card" {
+		s.auditDeny(a.ID, g.Handle, "card", "", "not_card_handle")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant is not for a card handle"})
+		return
+	}
+	u, err := url.Parse(req.URL)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		s.auditDeny(a.ID, g.Handle, "card", "", "bad_url")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid url"})
+		return
+	}
+	merchant := u.Hostname()
 	var p policy.Policy
-	json.Unmarshal([]byte(g.Policy), &p)
+	if err := json.Unmarshal([]byte(g.Policy), &p); err != nil {
+		s.auditDeny(a.ID, g.Handle, "card", merchant, "grant_invalid")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant_invalid"})
+		return
+	}
 	d := policy.Evaluate(&p, &policy.GrantView{ExpiresAt: g.ExpiresAt, Uses: g.Uses, MaxUses: g.MaxUses}, policy.Request{
-		Merchant: req.Merchant, Amount: req.Amount, Currency: req.Currency, Now: time.Now(),
+		Host: merchant, Merchant: merchant, Path: u.Path, Method: req.Method,
+		Amount: req.Amount, Currency: req.Currency, Now: time.Now(),
 	})
 	if !d.Allow {
-		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "card", Target: req.Merchant, Decision: "deny", Detail: "{}"})
+		s.auditDeny(a.ID, g.Handle, "card", merchant, d.Reason)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": d.Reason})
 		return
 	}
-	_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "card", Target: req.Merchant, Decision: "allow", Detail: "{}"})
-	writeJSON(w, http.StatusNotImplemented, map[string]string{"status": "not_implemented"})
+	if _, err := s.issuer.Consume(req.GrantToken, a.ID); err != nil {
+		s.auditDeny(a.ID, g.Handle, "card", merchant, grantReason(err))
+		writeJSON(w, grantStatus(err), map[string]string{"error": "invalid grant"})
+		return
+	}
+	cred, err := s.st.GetCredential(g.Handle)
+	if err != nil {
+		s.auditDeny(a.ID, g.Handle, "card", merchant, "credential_error")
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown handle"})
+		return
+	}
+	fields, err := s.credValues(cred)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "credential decrypt failed"})
+		return
+	}
+	defer func() {
+		for k := range fields {
+			fields[k] = ""
+		}
+	}()
+	provName := "vgs"
+	var meta struct {
+		Provider string `json:"provider"`
+	}
+	if json.Unmarshal([]byte(cred.Metadata), &meta) == nil && meta.Provider != "" {
+		provName = meta.Provider
+	}
+	prov, err := s.cardProvider(provName)
+	if err != nil {
+		slog.Debug("card provider unavailable", "error", err)
+		s.auditDeny(a.ID, g.Handle, "card", merchant, "provider_error")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pay failed"})
+		return
+	}
+	freq, err := card.Fill(card.PayRequest{Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body}, fields)
+	if err != nil {
+		s.auditDeny(a.ID, g.Handle, "card", merchant, "fill_error")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "fill failed"})
+		return
+	}
+	res, err := card.Do(r.Context(), prov, freq)
+	if err != nil {
+		slog.Debug("card pay failed", "error", err)
+		s.auditDeny(a.ID, g.Handle, "card", merchant, "pay_error")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pay failed"})
+		return
+	}
+	detail, _ := json.Marshal(map[string]any{"amount": req.Amount, "currency": req.Currency})
+	_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "card", Target: merchant, Decision: "allow", Detail: string(detail)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "sent", "http_status": res.Status, "headers": res.Headers,
+		"body": res.Body, "truncated": res.Truncated,
+	})
 }
 
 type callRequest struct {

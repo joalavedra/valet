@@ -1,99 +1,95 @@
 package card
 
 import (
-	"context"
-	"encoding/base64"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
-	"time"
 )
 
-// VGS is a stub driver for Very Good Security.
-// VGS outbound routing is a forward proxy: clients send requests through
-// https://{username}:{password}@{vaultId}.{env}.verygoodproxy.com and the
-// vault swaps aliases for real PANs in transit. Phase 1 models this by
-// rewriting the request URL to the proxy host and setting basic auth;
-// TODO(vgs): confirm exact shape (CONNECT vs absolute-form) against
-// https://www.verygoodsecurity.com/docs — outbound connection docs.
+// VGS is the Very Good Security driver. VGS's outbound route is an HTTPS
+// forward proxy at https://USER:PASS@<vault>.<env>.verygoodproxy.com:8443;
+// detokenization happens proxy-side for upstream hosts that have an
+// Outbound Route configured in the VGS dashboard. TLS to the proxy requires
+// trusting VGS's environment CA (PEM file, VGS_CA_FILE).
 type VGS struct {
 	VaultID  string
 	Env      string // e.g. "sandbox" or "live"
-	RouteID  string
 	Username string
 	Password string
+	CAFile   string
 }
 
 func init() {
-	p := &VGS{
+	if os.Getenv("VGS_VAULT_ID") == "" {
+		return // register nothing so Get("vgs") reports a clear error
+	}
+	env := os.Getenv("VGS_ENV")
+	if env == "" {
+		env = "sandbox"
+	}
+	Register("vgs", &VGS{
 		VaultID:  os.Getenv("VGS_VAULT_ID"),
-		Env:      envOr("VGS_ENV", "sandbox"),
-		RouteID:  os.Getenv("VGS_ROUTE_ID"),
+		Env:      env,
 		Username: os.Getenv("VGS_USERNAME"),
 		Password: os.Getenv("VGS_PASSWORD"),
-	}
-	Register("vgs", p)
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
+		CAFile:   os.Getenv("VGS_CA_FILE"),
+	})
 }
 
 func (v *VGS) Name() string { return "vgs" }
 
-func (v *VGS) proxyHost() string {
-	return fmt.Sprintf("%s.%s.verygoodproxy.com", v.VaultID, v.Env)
+// Transport returns a RoundTripper routed through the VGS outbound proxy.
+func (v *VGS) Transport() (http.RoundTripper, error) {
+	if v.VaultID == "" || v.Username == "" || v.Password == "" {
+		return nil, errors.New("vgs: not configured (VGS_VAULT_ID/VGS_USERNAME/VGS_PASSWORD)")
+	}
+	env := v.Env
+	if env == "" {
+		env = "sandbox"
+	}
+	proxy, err := url.Parse(fmt.Sprintf("https://%s:%s@%s.%s.verygoodproxy.com:8443",
+		url.QueryEscape(v.Username), url.QueryEscape(v.Password), v.VaultID, env))
+	if err != nil {
+		return nil, err
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
+	if v.CAFile != "" {
+		pem, err := os.ReadFile(v.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("vgs: ca file: %w", err)
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("vgs: ca file is not PEM")
+		}
+	}
+	return &http.Transport{
+		Proxy:           http.ProxyURL(proxy),
+		TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	}, nil
 }
 
-func (v *VGS) CaptureConfig(ctx context.Context) (CaptureConfig, error) {
+// CaptureConfig describes the VGS Collect.js hosted-fields capture.
+func (v *VGS) CaptureConfig() (CaptureConfig, error) {
 	if v.VaultID == "" {
 		return CaptureConfig{}, errors.New("vgs: VGS_VAULT_ID not set")
+	}
+	env := v.Env
+	if env == "" {
+		env = "sandbox"
 	}
 	return CaptureConfig{
 		Provider: "vgs",
 		Fields: map[string]string{
-			"collect.js": fmt.Sprintf("https://js.verygoodvault.com/collect/%s", v.VaultID),
-			"route_id":   v.RouteID,
+			"vault_id":    v.VaultID,
+			"environment": env,
+			"collect_js":  "https://js.verygoodvault.com/vgs-collect/3.2.2/vgs-collect.js",
 		},
-	}, nil
-}
-
-func (v *VGS) Tokenize(ctx context.Context, raw CardInput) (Alias, error) {
-	if v.VaultID == "" {
-		return "", errors.New("vgs: VGS_VAULT_ID not set")
-	}
-	return Alias(fmt.Sprintf("vgs-sandbox-alias-%s", v.VaultID)), nil
-}
-
-func (v *VGS) OutboundRoute(ctx context.Context, alias Alias, req *http.Request) (*http.Request, error) {
-	if v.Username == "" || v.Password == "" {
-		return nil, errors.New("vgs: credentials not configured")
-	}
-	r := req.Clone(ctx)
-	u, err := url.Parse(r.URL.String())
-	if err != nil {
-		return nil, err
-	}
-	u.Scheme = "https"
-	u.Host = v.proxyHost()
-	r.URL = u
-	r.Header.Set("Proxy-Authorization",
-		"Basic "+base64.StdEncoding.EncodeToString([]byte(v.Username+":"+v.Password)))
-	r.Header.Set("X-VGS-Alias", string(alias))
-	return r, nil
-}
-
-func (v *VGS) UpdateCVC(ctx context.Context, alias Alias, ttl time.Duration) (StepUpConfig, error) {
-	if v.VaultID == "" {
-		return StepUpConfig{}, errors.New("vgs: VGS_VAULT_ID not set")
-	}
-	return StepUpConfig{
-		URL:     fmt.Sprintf("https://%s.verygoodsecurity.com/collect/cvc?alias=%s", v.proxyHost(), url.QueryEscape(string(alias))),
-		Expires: ttl,
 	}, nil
 }

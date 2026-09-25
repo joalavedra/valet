@@ -22,7 +22,7 @@ type Backend interface {
 	RequestGrant(ctx context.Context, handle string, policyJSON string, ttl string) (any, error)
 	BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string, pageURL string) (any, error)
 	HTTPCall(ctx context.Context, grant, method, url, headersJSON, body string) (any, error)
-	Pay(ctx context.Context, grant, merchant string, amount int64, currency, rail string) (any, error)
+	Pay(ctx context.Context, grant, url, method string, headers map[string]string, body string, amount int64, currency string) (any, error)
 }
 
 // HTTPBackend forwards tool calls to a running valet server.
@@ -147,11 +147,16 @@ func (b *HTTPBackend) HTTPCall(ctx context.Context, grant, method, url, headersJ
 	return out, err
 }
 
-func (b *HTTPBackend) Pay(ctx context.Context, grant, merchant string, amount int64, currency, rail string) (any, error) {
+func (b *HTTPBackend) Pay(ctx context.Context, grant, url, method string, headers map[string]string, body string, amount int64, currency string) (any, error) {
 	var out any
-	err := b.call(ctx, "POST", "/v1/edge/card/pay", map[string]any{
-		"grant": grant, "merchant": merchant, "amount": amount, "currency": currency, "rail": rail,
-	}, &out)
+	payload := map[string]any{
+		"grant_token": grant, "url": url, "method": method,
+		"body": body, "amount": amount, "currency": currency,
+	}
+	if len(headers) > 0 {
+		payload["headers"] = headers
+	}
+	err := b.call(ctx, "POST", "/v1/edge/card/pay", payload, &out)
 	return out, err
 }
 
@@ -180,11 +185,13 @@ type browserFillArgs struct {
 }
 
 type payArgs struct {
-	Grant    string `json:"grant" jsonschema:"grant token"`
-	Merchant string `json:"merchant" jsonschema:"merchant domain"`
-	Amount   int64  `json:"amount" jsonschema:"amount in minor currency units"`
-	Currency string `json:"currency" jsonschema:"ISO currency code"`
-	Rail     string `json:"rail,omitempty" jsonschema:"payment rail override"`
+	Grant    string            `json:"grant" jsonschema:"grant token"`
+	URL      string            `json:"url" jsonschema:"merchant payment API URL (https)"`
+	Method   string            `json:"method,omitempty" jsonschema:"HTTP method, default POST"`
+	Headers  map[string]string `json:"headers,omitempty" jsonschema:"extra request headers"`
+	Body     string            `json:"body" jsonschema:"request body; use {{card.number}} {{card.exp_month}} {{card.exp_year}} {{card.cvc}} {{card.holder}} placeholders"`
+	Amount   int64             `json:"amount" jsonschema:"amount in minor currency units"`
+	Currency string            `json:"currency" jsonschema:"ISO currency code"`
 }
 
 func result(v any, err error) (*mcp.CallToolResult, any, error) {
@@ -214,9 +221,9 @@ func New(b Backend) *mcp.Server {
 		func(ctx context.Context, req *mcp.CallToolRequest, args browserFillArgs) (*mcp.CallToolResult, any, error) {
 			return result(b.BrowserFill(ctx, args.Grant, args.CDPWSURL, args.Mapping, args.Submit, args.PageURL))
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "pay", Description: "Pay a merchant with a stored card handle. Returns a receipt/status, never a PAN."},
+	mcp.AddTool(s, &mcp.Tool{Name: "pay", Description: "Pay at a merchant's payment API using a stored card handle. Put {{card.number}}, {{card.exp_month}}, {{card.exp_year}}, {{card.cvc}}, {{card.holder}} placeholders in body; Valet substitutes and routes via the card vault proxy. Returns HTTP status + filtered body, never card data."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args payArgs) (*mcp.CallToolResult, any, error) {
-			return result(b.Pay(ctx, args.Grant, args.Merchant, args.Amount, args.Currency, args.Rail))
+			return result(b.Pay(ctx, args.Grant, args.URL, args.Method, args.Headers, args.Body, args.Amount, args.Currency))
 		})
 	return s
 }

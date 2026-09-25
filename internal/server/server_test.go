@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/joalavedra/valet/internal/audit"
 	"github.com/joalavedra/valet/internal/crypto"
 	"github.com/joalavedra/valet/internal/edge/browser"
+	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
 	"github.com/joalavedra/valet/internal/grant"
 	"github.com/joalavedra/valet/internal/store"
@@ -77,11 +79,16 @@ func testServer(t *testing.T) (*Server, *store.SQLite, string) {
 
 func issueGrant(t *testing.T, srv *Server, st *store.SQLite, agentTok, policyJSON string, ttl time.Duration) string {
 	t.Helper()
+	return issueGrantHandle(t, srv, st, agentTok, "cred://github.com/joan", policyJSON, ttl)
+}
+
+func issueGrantHandle(t *testing.T, srv *Server, st *store.SQLite, agentTok, handleID, policyJSON string, ttl time.Duration) string {
+	t.Helper()
 	a, err := st.GetAgentByTokenHash(hashToken(agentTok))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, _, err := srv.issuer.Issue(a.ID, "cred://github.com/joan", policyJSON, ttl, 0)
+	tok, _, err := srv.issuer.Issue(a.ID, handleID, policyJSON, ttl, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,15 +277,138 @@ func TestBrowserFillExpiredGrant(t *testing.T) {
 	}
 }
 
-func TestCardPayNotImplemented(t *testing.T) {
-	srv, st, tok := testServer(t)
-	gtok := issueGrant(t, srv, st, tok, `{"spend":{"per_tx":100,"merchants":["shop.com"]}}`, time.Hour)
-	payload, _ := json.Marshal(map[string]any{"grant": gtok, "merchant": "shop.com", "amount": 50, "currency": "USD"})
+// fakeProvider short-circuits card.Do to a local upstream (no real proxy).
+type fakeProvider struct {
+	upstream *httptest.Server
+	err      error
+}
+
+func (f *fakeProvider) Name() string { return "fake" }
+func (f *fakeProvider) Transport() (http.RoundTripper, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.upstream != nil {
+		// TLS test server: trust its cert.
+		return f.upstream.Client().Transport, nil
+	}
+	return http.DefaultTransport, nil
+}
+func (f *fakeProvider) CaptureConfig() (card.CaptureConfig, error) {
+	return card.CaptureConfig{Provider: "fake"}, nil
+}
+
+func cardCred(t *testing.T, srv *Server, st *store.SQLite) {
+	t.Helper()
+	dek := srv.dek
+	pt, _ := json.Marshal(map[string]string{
+		"number": "tok_card_123", "exp_month": "12", "exp_year": "2030", "holder": "Joan",
+	})
+	ct, err := crypto.Encrypt(dek, pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddCredential(&store.Credential{
+		Handle: "card://visa-4242", Type: "card", Label: "visa-4242",
+		Metadata: `{"provider":"vgs"}`, Ciphertext: ct,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func payReq(t *testing.T, tok string, body map[string]any) (*httptest.ResponseRecorder, *http.Request) {
+	t.Helper()
+	payload, _ := json.Marshal(body)
 	req := httptest.NewRequest("POST", "/v1/edge/card/pay", bytes.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer "+tok)
-	rec := httptest.NewRecorder()
+	return httptest.NewRecorder(), req
+}
+
+func TestCardPayDeniedMerchant(t *testing.T) {
+	srv, st, tok := testServer(t)
+	cardCred(t, srv, st)
+	srv.SetCardProvider(&fakeProvider{})
+	gtok := issueGrantHandle(t, srv, st, tok, "card://visa-4242", `{"spend":{"per_tx":10000,"merchants":["shop.com"]}}`, time.Hour)
+	rec, req := payReq(t, tok, map[string]any{
+		"grant_token": gtok, "url": "https://evil.com/charge", "amount": 50, "currency": "USD",
+		"body": `{"amount":"{{card.number}}"}`, "method": "POST",
+	})
 	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
+	if rec.Code != 403 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCardPayAmountOverLimit(t *testing.T) {
+	srv, st, tok := testServer(t)
+	cardCred(t, srv, st)
+	srv.SetCardProvider(&fakeProvider{})
+	gtok := issueGrantHandle(t, srv, st, tok, "card://visa-4242", `{"spend":{"per_tx":100,"merchants":["shop.com"]}}`, time.Hour)
+	rec, req := payReq(t, tok, map[string]any{
+		"grant_token": gtok, "url": "https://shop.com/charge", "amount": 5000, "currency": "USD",
+	})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCardPayNonCardHandle(t *testing.T) {
+	srv, st, tok := testServer(t)
+	gtok := issueGrant(t, srv, st, tok, `{"hosts":["github.com"]}`, time.Hour)
+	rec, req := payReq(t, tok, map[string]any{
+		"grant_token": gtok, "url": "https://shop.com/charge", "amount": 1, "currency": "USD",
+	})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "not for a card handle") {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCardPaySuccess(t *testing.T) {
+	srv, st, tok := testServer(t)
+	cardCred(t, srv, st)
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), "tok_card_123") {
+			t.Error("placeholder not substituted")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"charged":true}`)
+	}))
+	defer upstream.Close()
+	srv.SetCardProvider(&fakeProvider{upstream: upstream})
+	gtok := issueGrantHandle(t, srv, st, tok, "card://visa-4242", `{"spend":{"merchants":["*"]}}`, time.Hour)
+	rec, req := payReq(t, tok, map[string]any{
+		"grant_token": gtok, "url": upstream.URL + "/charge", "method": "POST",
+		"body":   `{"pan":"{{card.number}}","exp":"{{card.exp_month}}/{{card.exp_year}}","cvc":""}`,
+		"amount": 50, "currency": "USD",
+	})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Status     string `json:"status"`
+		HTTPStatus int    `json:"http_status"`
+		Body       string `json:"body"`
+	}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if out.Status != "sent" || out.HTTPStatus != 200 || !strings.Contains(out.Body, "charged") {
+		t.Fatalf("bad response: %v", out)
+	}
+}
+
+func TestCardPayErrorNoLeak(t *testing.T) {
+	srv, st, tok := testServer(t)
+	cardCred(t, srv, st)
+	srv.SetCardProvider(&fakeProvider{err: fmt.Errorf("dial tok_card_123 boom")})
+	gtok := issueGrantHandle(t, srv, st, tok, "card://visa-4242", `{"spend":{"merchants":["*"]}}`, time.Hour)
+	rec, req := payReq(t, tok, map[string]any{
+		"grant_token": gtok, "url": "https://shop.com/x", "amount": 1, "currency": "USD",
+	})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 502 || strings.Contains(rec.Body.String(), "tok_card_123") {
 		t.Fatalf("got %d %s", rec.Code, rec.Body)
 	}
 }
