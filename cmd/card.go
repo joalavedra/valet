@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
@@ -20,6 +21,9 @@ var cardCaptureCmd = &cobra.Command{
 	Use:   "capture",
 	Short: "Create a one-time browser link for a cardholder to enter their card via VGS Collect.js",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if cardCaptureTTL <= 0 {
+			return fmt.Errorf("--ttl must be positive")
+		}
 		st, err := store.OpenSQLite(serverDB)
 		if err != nil {
 			return err
@@ -52,6 +56,12 @@ var cardCaptureCmd = &cobra.Command{
 		}
 		fmt.Printf("Open in the cardholder's browser: %s/capture/%s\n", base, token)
 		fmt.Printf("Link expires at %s and works once.\n", expires.UTC().Format(time.RFC3339))
+		if u, err := url.Parse(base); err == nil && u.Scheme == "http" {
+			host := u.Hostname()
+			if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+				fmt.Fprintln(os.Stderr, "warning: capture link is plain HTTP; set VALET_PUBLIC_URL to an https:// URL before sharing it")
+			}
+		}
 		return nil
 	},
 }

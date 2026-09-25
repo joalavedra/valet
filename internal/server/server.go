@@ -262,6 +262,16 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad exp_year"})
 		return
 	}
+	y, _ := strconv.Atoi(req.ExpYear)
+	now := time.Now().UTC()
+	if y > now.Year()+30 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad exp_year"})
+		return
+	}
+	if y < now.Year() || (y == now.Year() && m < int(now.Month())) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "card expired"})
+		return
+	}
 	if err := s.st.MarkCaptureUsed(c.Token); err != nil {
 		writeJSON(w, http.StatusGone, map[string]string{"error": "capture already used"})
 		return

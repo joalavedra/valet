@@ -64,7 +64,7 @@ function aliasFor(data, name) {
     for (var i = 0; i < data.data.length; i++) {
       var d = data.data[i];
       if (d && d.name === name && d.alias) return d.alias;
-      if (d && d.aliases && d.aliases.length && d.aliases[0].alias) return d.aliases[0].alias;
+      if (d && d.name === name && d.aliases && d.aliases.length && d.aliases[0].alias) return d.aliases[0].alias;
     }
   }
   return '';

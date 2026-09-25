@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -919,5 +920,46 @@ func TestCaptureCompleteRejectsLongCVC(t *testing.T) {
 	})
 	if rec.Code != 400 {
 		t.Fatalf("16-digit cvc accepted: %d", rec.Code)
+	}
+}
+
+func TestCaptureCompleteRejectsExpired(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	tok := newCapture(t, st, "visa-old", time.Hour)
+	now := time.Now().UTC()
+	// past year → expired
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_x", "exp_month": "12", "exp_year": "2020",
+	})
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "card expired") {
+		t.Fatalf("past year: got %d %s", rec.Code, rec.Body)
+	}
+	// earlier month this year → expired
+	if now.Month() > 1 {
+		rec = capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+			"number": "tok_x", "exp_month": "1", "exp_year": strconv.Itoa(now.Year()),
+		})
+		if rec.Code != 400 || !strings.Contains(rec.Body.String(), "card expired") {
+			t.Fatalf("past month: got %d %s", rec.Code, rec.Body)
+		}
+	}
+	// far-future year → bad exp_year
+	rec = capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_x", "exp_month": "12", "exp_year": strconv.Itoa(now.Year() + 31),
+	})
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "bad exp_year") {
+		t.Fatalf("far year: got %d %s", rec.Code, rec.Body)
+	}
+	// capture must NOT be consumed — a valid completion still succeeds
+	c, _ := st.GetCapture(tok)
+	if c.UsedAt != nil {
+		t.Fatal("capture consumed on reject")
+	}
+	rec = capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_x", "exp_month": strconv.Itoa(int(now.Month())), "exp_year": strconv.Itoa(now.Year()),
+	})
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "card://visa-old") {
+		t.Fatalf("current month: got %d %s", rec.Code, rec.Body)
 	}
 }
