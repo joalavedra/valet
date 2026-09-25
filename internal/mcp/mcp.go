@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,7 +20,7 @@ import (
 type Backend interface {
 	ListHandles(ctx context.Context) (any, error)
 	RequestGrant(ctx context.Context, handle string, policyJSON string, ttl string) (any, error)
-	BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string) (any, error)
+	BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string, pageURL string) (any, error)
 	HTTPCall(ctx context.Context, grant, method, url, headersJSON, body string) (any, error)
 	Pay(ctx context.Context, grant, merchant string, amount int64, currency, rail string) (any, error)
 }
@@ -115,11 +116,19 @@ func (b *HTTPBackend) RequestGrant(ctx context.Context, handle, policyJSON, ttl 
 }
 
 // BrowserFill asks the browser edge to fill fields via CDP.
-func (b *HTTPBackend) BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string) (any, error) {
+func (b *HTTPBackend) BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string, pageURL string) (any, error) {
 	var out any
-	err := b.call(ctx, "POST", "/v1/edge/browser/fill", map[string]any{
-		"grant_token": grant, "cdp_ws_url": cdpWSURL, "mapping": mapping, "submit": submit,
-	}, &out)
+	body := map[string]any{"grant_token": grant, "mapping": mapping}
+	if cdpWSURL != "" {
+		body["cdp_ws_url"] = cdpWSURL
+	}
+	if submit != "" {
+		body["submit"] = submit
+	}
+	if pageURL != "" {
+		body["page_url"] = pageURL
+	}
+	err := b.call(ctx, "POST", "/v1/edge/browser/fill", body, &out)
 	return out, err
 }
 
@@ -164,7 +173,8 @@ type httpCallArgs struct {
 
 type browserFillArgs struct {
 	Grant    string            `json:"grant" jsonschema:"grant token"`
-	CDPWSURL string            `json:"cdp_ws_url" jsonschema:"CDP websocket URL of the agent browser"`
+	CDPWSURL string            `json:"cdp_ws_url,omitempty" jsonschema:"optional; defaults to the server's VALET_CDP_URL"`
+	PageURL  string            `json:"page_url,omitempty" jsonschema:"URL of the tab to fill; Valet picks the matching tab"`
 	Mapping  map[string]string `json:"mapping" jsonschema:"field name -> CSS selector"`
 	Submit   string            `json:"submit,omitempty" jsonschema:"optional submit-button CSS selector"`
 }
@@ -202,7 +212,7 @@ func New(b Backend) *mcp.Server {
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "browser_fill", Description: "Fill login form fields in the agent's browser via CDP. Returns status only, never typed values."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args browserFillArgs) (*mcp.CallToolResult, any, error) {
-			return result(b.BrowserFill(ctx, args.Grant, args.CDPWSURL, args.Mapping, args.Submit))
+			return result(b.BrowserFill(ctx, args.Grant, args.CDPWSURL, args.Mapping, args.Submit, args.PageURL))
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "pay", Description: "Pay a merchant with a stored card handle. Returns a receipt/status, never a PAN."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args payArgs) (*mcp.CallToolResult, any, error) {
@@ -214,4 +224,22 @@ func New(b Backend) *mcp.Server {
 // Run serves the MCP server over stdio.
 func Run(ctx context.Context, b Backend) error {
 	return New(b).Run(ctx, &mcp.StdioTransport{})
+}
+
+// RunHTTP serves the MCP server over streamable HTTP on {addr}/mcp.
+// The transport has no auth of its own — bind to loopback or a trusted proxy.
+func RunHTTP(ctx context.Context, b Backend, addr string) error {
+	srv := New(b)
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil)
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", handler)
+	h := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		_ = h.Shutdown(context.Background())
+	}()
+	if err := h.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }

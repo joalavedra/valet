@@ -23,15 +23,26 @@ import (
 type fakeFiller struct {
 	pageURL    string
 	gotValues  map[string]string
+	gotCDP     string
 	fillErr    error
 	fillStatus browser.Result
+	resolveWS  string
+	resolveErr error
 }
 
 func (f *fakeFiller) PageURL(ctx context.Context, ws string) (string, error) {
 	return f.pageURL, nil
 }
 
+func (f *fakeFiller) ResolvePage(ctx context.Context, cdpURL, pageURL string) (string, error) {
+	if f.resolveErr != nil {
+		return "", f.resolveErr
+	}
+	return f.resolveWS, nil
+}
+
 func (f *fakeFiller) Fill(ctx context.Context, ws, expectedHost string, mapping map[string]string, submit string, values map[string]string) (browser.Result, error) {
+	f.gotCDP = ws
 	cp := map[string]string{}
 	for k, v := range values {
 		cp[k] = v
@@ -456,5 +467,64 @@ func TestHTTPCallExpiredGrant(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestFillPageURLResolves(t *testing.T) {
+	srv, st, tok := testServer(t)
+	srv.filler = &fakeFiller{pageURL: "https://github.com/login", resolveWS: "ws://127.0.0.1:9222/devtools/page/P1"}
+	g := issueGrant(t, srv, st, tok, `{"hosts":["github.com"]}`, time.Minute)
+	rec, req := fillReq(t, tok, map[string]any{
+		"grant_token": g, "cdp_ws_url": "ws://127.0.0.1:9222/devtools/browser/x",
+		"page_url": "https://github.com/login", "mapping": map[string]string{"u": "#u"},
+	})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	ff := srv.filler.(*fakeFiller)
+	if ff.gotCDP != "ws://127.0.0.1:9222/devtools/page/P1" {
+		t.Fatalf("Fill used %q, want resolved ws", ff.gotCDP)
+	}
+}
+
+func TestFillDefaultCDP(t *testing.T) {
+	srv, st, tok := testServer(t)
+	srv.filler = &fakeFiller{pageURL: "https://github.com/login"}
+	srv.SetCDPDefault("http://127.0.0.1:9222")
+	g := issueGrant(t, srv, st, tok, `{"hosts":["github.com"]}`, time.Minute)
+	rec, req := fillReq(t, tok, map[string]any{
+		"grant_token": g, "mapping": map[string]string{"u": "#u"},
+	})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFillMissingCDP(t *testing.T) {
+	srv, _, tok := testServer(t)
+	rec, req := fillReq(t, tok, map[string]any{"grant_token": "x", "mapping": map[string]string{"u": "#u"}})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "cdp_ws_url required") {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFillPageResolveError(t *testing.T) {
+	srv, st, tok := testServer(t)
+	srv.filler = &fakeFiller{resolveErr: fmt.Errorf("page not found")}
+	srv.SetCDPDefault("http://127.0.0.1:9222")
+	g := issueGrant(t, srv, st, tok, `{"hosts":["github.com"]}`, time.Minute)
+	rec, req := fillReq(t, tok, map[string]any{
+		"grant_token": g, "page_url": "https://github.com/nope", "mapping": map[string]string{"u": "#u"},
+	})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 404 {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	audits, err := st.ListAudit(10)
+	if err != nil || len(audits) == 0 || !strings.Contains(audits[len(audits)-1].Detail, "page_not_found") {
+		t.Fatalf("audit: %v %v", audits, err)
 	}
 }

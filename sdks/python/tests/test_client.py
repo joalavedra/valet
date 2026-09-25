@@ -87,3 +87,18 @@ async def test_http_call_payload():
     await c.http_call("g", "GET", "https://api.x/v1", headers={"A": "1"})
     assert got["body"]["grant_token"] == "g"
     assert got["body"]["headers"] == {"A": "1"}
+
+async def test_browser_fill_page_url():
+    got = {}
+
+    def h(r: httpx.Request) -> httpx.Response:
+        import json
+
+        got["body"] = json.loads(r.content)
+        return httpx.Response(200, json={"status": "ok"})
+
+    c = make_client(h)
+    await c.browser_fill("g.sig", mapping={"u": "#u"}, page_url="https://github.com/login")
+    assert "cdp_ws_url" not in got["body"]
+    assert got["body"]["page_url"] == "https://github.com/login"
+    assert got["body"]["mapping"] == {"u": "#u"}

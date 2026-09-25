@@ -116,6 +116,25 @@ agent = Agent(task="Log in via valet_login ...", llm=ChatOpenAI(model="gpt-4o-mi
 only a status string, never the password. See
 `sdks/python/examples/browser-use/login.py`.
 
+## Running under hotdesk / remote-CDP hosts
+
+Agents behind an MCP-over-HTTP proxy or a shared CDP browser (e.g. hotdesk)
+never see devtools websocket URLs. Valet can own both ends:
+
+```bash
+VALET_CDP_URL=http://127.0.0.1:9222 valet server   # default CDP endpoint
+valet mcp --http 127.0.0.1:14401                    # streamable HTTP on /mcp
+```
+
+With `VALET_CDP_URL` set, `browser_fill` may omit `cdp_ws_url`. Agents can
+also pass `page_url` — the URL of the tab to fill — and Valet picks the
+matching page target (exact match, then host+path ignoring query, then a
+unique-host fallback; ambiguous → error). The default endpoint's host must
+still satisfy `VALET_CDP_ALLOW` (loopback by default).
+
+Note: the `--http` transport has no auth of its own — bind loopback or put it
+behind a trusted proxy.
+
 ## Dev
 
 ```bash
