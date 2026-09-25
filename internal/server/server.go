@@ -145,8 +145,9 @@ func (s *Server) validCapture(token string) *store.Capture {
 }
 
 const captureCSP = "default-src 'none'; script-src 'self' 'unsafe-inline' https://js.verygoodvault.com; " +
-	"frame-src https://*.verygoodvault.com https:; connect-src https://*.verygoodvault.com https://*.verygoodproxy.com 'self'; " +
-	"img-src https://*.verygoodvault.com data:; style-src 'self' 'unsafe-inline'"
+	"frame-src https://*.verygoodvault.com https://*.verygood.systems https:; " +
+	"connect-src https://*.verygoodvault.com https://*.verygoodproxy.com https://*.verygood.systems 'self'; " +
+	"img-src https://*.verygoodvault.com https://*.verygood.systems data:; style-src 'self' 'unsafe-inline'"
 
 // capturePage serves the one-time Collect.js form; the token is the auth.
 func (s *Server) capturePage(w http.ResponseWriter, r *http.Request) {
