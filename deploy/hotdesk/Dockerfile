@@ -20,7 +20,7 @@ ARG VALET_VERSION
 RUN apk add --no-cache curl \
     && curl -fsSL "https://github.com/joalavedra/valet/releases/download/v${VALET_VERSION}/valet_${VALET_VERSION}_linux_amd64.tar.gz" \
        | tar -xz -C /tmp valet \
-    && mv /tmp/valet /out/valet && chmod 755 /out/valet
+    && mkdir -p /out && mv /tmp/valet /out/valet && chmod 755 /out/valet
 
 FROM ${BASE}
 ARG VALET_SRC
