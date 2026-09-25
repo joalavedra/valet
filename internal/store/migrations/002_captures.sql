@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS captures (
+    token TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    expires_at TIMESTAMP NOT NULL,
+    used_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

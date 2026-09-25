@@ -37,6 +37,18 @@ type Grant struct {
 	CreatedAt time.Time
 }
 
+// Capture is a pending browser card-capture session. The token is the only
+// auth to the capture page; once completed it's marked used and the card
+// fields land in credentials.
+type Capture struct {
+	Token     string
+	Label     string
+	Metadata  string // JSON
+	ExpiresAt time.Time
+	UsedAt    *time.Time
+	CreatedAt time.Time
+}
+
 // AuditEntry is one link in the hash-chained audit log.
 type AuditEntry struct {
 	ID       int64
@@ -63,6 +75,10 @@ type Store interface {
 	AddGrant(g *Grant) error
 	GetGrant(id string) (*Grant, error)
 	IncrementGrantUses(id string) error
+
+	CreateCapture(c *Capture) error
+	GetCapture(token string) (*Capture, error)
+	MarkCaptureUsed(token string) error
 
 	AppendAudit(e *AuditEntry) error
 	LastAudit() (*AuditEntry, error)

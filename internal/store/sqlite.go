@@ -112,6 +112,47 @@ func (s *SQLite) IncrementGrantUses(id string) error {
 	return err
 }
 
+func (s *SQLite) CreateCapture(c *Capture) error {
+	_, err := s.db.Exec(
+		`INSERT INTO captures (token, label, metadata_json, expires_at) VALUES (?,?,?,?)`,
+		c.Token, c.Label, c.Metadata, c.ExpiresAt)
+	return err
+}
+
+func (s *SQLite) GetCapture(token string) (*Capture, error) {
+	c := &Capture{}
+	var usedAt sql.NullTime
+	err := s.db.QueryRow(
+		`SELECT token, label, metadata_json, expires_at, used_at, created_at FROM captures WHERE token=?`,
+		token).Scan(&c.Token, &c.Label, &c.Metadata, &c.ExpiresAt, &usedAt, &c.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if usedAt.Valid {
+		c.UsedAt = &usedAt.Time
+	}
+	return c, nil
+}
+
+// MarkCaptureUsed atomically claims the capture; it errors if the token is
+// already used so only one submission can ever complete.
+func (s *SQLite) MarkCaptureUsed(token string) error {
+	res, err := s.db.Exec(
+		`UPDATE captures SET used_at=CURRENT_TIMESTAMP WHERE token=? AND used_at IS NULL`,
+		token)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return errors.New("store: capture already used")
+	}
+	return nil
+}
+
 func (s *SQLite) AppendAudit(e *AuditEntry) error {
 	_, err := s.db.Exec(
 		`INSERT INTO audit (agent_id, handle, edge, target, decision, detail_json, prev_hash, hash) VALUES (?,?,?,?,?,?,?,?)`,

@@ -29,6 +29,10 @@ import (
 //go:embed vgs_sandbox.pem
 var sandboxPEM []byte
 
+// vgsCollectVersion is the latest stable Collect.js release per the VGS
+// changelog (3.4.0, Dec 2025).
+const vgsCollectVersion = "3.4.0"
+
 type VGS struct {
 	VaultID      string
 	Env          string // e.g. "sandbox" or "live"
@@ -207,9 +211,10 @@ func (v *VGS) CaptureConfig() (CaptureConfig, error) {
 	return CaptureConfig{
 		Provider: "vgs",
 		Fields: map[string]string{
-			"vault_id":    v.VaultID,
-			"environment": env,
-			"collect_js":  "https://js.verygoodvault.com/vgs-collect/3.2.2/vgs-collect.js",
+			"vault_id":        v.VaultID,
+			"environment":     env,
+			"collect_js":      "https://js.verygoodvault.com/vgs-collect/" + vgsCollectVersion + "/vgs-collect.js",
+			"collect_version": vgsCollectVersion,
 		},
 	}, nil
 }

@@ -4,14 +4,18 @@ package server
 
 import (
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +61,8 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 	s.mux.HandleFunc("POST /v1/edge/card/pay", s.agentAuth(s.cardPay))
 	s.mux.HandleFunc("POST /v1/edge/http/call", s.agentAuth(s.httpCall))
 	s.mux.HandleFunc("GET /v1/audit", s.ownerAuth(s.listAudit))
+	s.mux.HandleFunc("GET /capture/{token}", s.capturePage)
+	s.mux.HandleFunc("POST /capture/{token}/complete", s.captureComplete)
 	return s
 }
 
@@ -123,6 +129,189 @@ func (s *Server) ownerAuth(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+//go:embed capture.html
+var capturePageHTML string
+var captureTmpl = template.Must(template.New("capture").Parse(capturePageHTML))
+
+// validCapture returns the capture if it exists, is unused and unexpired.
+func (s *Server) validCapture(token string) *store.Capture {
+	c, err := s.st.GetCapture(token)
+	if err != nil || c.UsedAt != nil || time.Now().After(c.ExpiresAt) {
+		return nil
+	}
+	return c
+}
+
+const captureCSP = "default-src 'none'; script-src 'self' 'unsafe-inline' https://js.verygoodvault.com; " +
+	"frame-src https://*.verygoodvault.com https://*.verygood.systems https:; " +
+	"connect-src https://*.verygoodvault.com https://*.verygoodproxy.com https://*.verygood.systems 'self'; " +
+	"img-src https://*.verygoodvault.com https://*.verygood.systems data:; style-src 'self' 'unsafe-inline'"
+
+// capturePage serves the one-time Collect.js form; the token is the auth.
+func (s *Server) capturePage(w http.ResponseWriter, r *http.Request) {
+	c := s.validCapture(r.PathValue("token"))
+	if c == nil {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "capture not found"})
+		return
+	}
+	prov, err := s.cardProvider("vgs")
+	if err != nil {
+		slog.Debug("capture provider unavailable", "error", err)
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card provider not configured"})
+		return
+	}
+	cfg, err := prov.CaptureConfig()
+	if err != nil {
+		slog.Debug("capture config failed", "error", err)
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card provider not configured"})
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", captureCSP)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	data := map[string]string{
+		"Token":          c.Token,
+		"VaultID":        cfg.Fields["vault_id"],
+		"Env":            cfg.Fields["environment"],
+		"CollectVersion": cfg.Fields["collect_version"],
+	}
+	if data["CollectVersion"] == "" {
+		data["CollectVersion"] = "3.4.0"
+	}
+	if err := captureTmpl.Execute(w, data); err != nil {
+		slog.Debug("capture template failed", "error", err)
+	}
+}
+
+type captureCompleteRequest struct {
+	Number   string `json:"number"`
+	CVC      string `json:"cvc"`
+	ExpMonth string `json:"exp_month"`
+	ExpYear  string `json:"exp_year"`
+	Holder   string `json:"holder"`
+	Last4    string `json:"last4"`
+	Bin      string `json:"bin"`
+}
+
+var tokAliasRE = regexp.MustCompile(`^tok_[A-Za-z0-9_]+$`)
+var cvcAliasRE = regexp.MustCompile(`^(tok_[A-Za-z0-9_]+|\d{3,4})$`)
+var binRE = regexp.MustCompile(`^\d{6,8}$`)
+var last4RE = regexp.MustCompile(`^\d{4}$`)
+var yearRE = regexp.MustCompile(`^\d{4}$`)
+
+func luhnPan(s string) bool {
+	var digits []byte
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+		digits = append(digits, s[i]-'0')
+	}
+	if len(digits) < 13 || len(digits) > 19 {
+		return false
+	}
+	sum, alt := 0, false
+	for i := len(digits) - 1; i >= 0; i-- {
+		d := int(digits[i])
+		if alt {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		alt = !alt
+	}
+	return sum%10 == 0
+}
+
+// captureComplete stores a card credential from Collect.js aliases. The
+// capture is claimed atomically before the credential is written so a token
+// can never mint two cards.
+func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	c := s.validCapture(r.PathValue("token"))
+	if c == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "capture not found"})
+		return
+	}
+	var req captureCompleteRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		return
+	}
+	// Number must be a UUID-format alias (tok_…); format-preserving aliases
+	// are Luhn-valid and indistinguishable from a PAN. CVC aliases are tok_ or
+	// a 3–4 digit length-preserving alias, too short to be a PAN.
+	if !tokAliasRE.MatchString(req.Number) || luhnPan(req.Number) ||
+		(req.CVC != "" && !cvcAliasRE.MatchString(req.CVC)) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "raw card data rejected"})
+		return
+	}
+	m, err := strconv.Atoi(req.ExpMonth)
+	if err != nil || m < 1 || m > 12 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad exp_month"})
+		return
+	}
+	if !yearRE.MatchString(req.ExpYear) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad exp_year"})
+		return
+	}
+	y, _ := strconv.Atoi(req.ExpYear)
+	now := time.Now().UTC()
+	if y > now.Year()+30 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad exp_year"})
+		return
+	}
+	if y < now.Year() || (y == now.Year() && m < int(now.Month())) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "card expired"})
+		return
+	}
+	if err := s.st.MarkCaptureUsed(c.Token); err != nil {
+		writeJSON(w, http.StatusGone, map[string]string{"error": "capture already used"})
+		return
+	}
+	fields := map[string]string{
+		"number": req.Number, "exp_month": req.ExpMonth,
+		"exp_year": req.ExpYear, "holder": req.Holder,
+	}
+	if req.CVC != "" {
+		fields["cvc"] = req.CVC
+	}
+	metaMap := map[string]string{"provider": "vgs", "source": "collect"}
+	if last4RE.MatchString(req.Last4) {
+		metaMap["last4"] = req.Last4
+	}
+	if binRE.MatchString(req.Bin) {
+		metaMap["bin"] = req.Bin
+	}
+	meta, _ := json.Marshal(metaMap)
+	pt, _ := json.Marshal(fields)
+	ct, err := crypto.Encrypt(s.dek, pt)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "encrypt failed"})
+		return
+	}
+	h, err := handle.New("card", "", c.Label)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad label"})
+		return
+	}
+	if err := s.st.AddCredential(&store.Credential{
+		Handle: h.String(), Type: "card", Label: c.Label,
+		Metadata: string(meta), Ciphertext: ct,
+	}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store failed"})
+		return
+	}
+	detail, _ := json.Marshal(map[string]string{"handle": h.String(), "source": "collect"})
+	_ = s.chain.Append(&store.AuditEntry{Handle: h.String(), Edge: "card", Target: "capture", Decision: "allow", Detail: string(detail)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "handle": h.String()})
 }
 
 type handleInfo struct {
