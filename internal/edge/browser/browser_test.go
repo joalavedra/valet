@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"testing"
+
+	"github.com/chromedp/chromedp"
 )
 
 func TestMask(t *testing.T) {
@@ -37,8 +39,14 @@ func TestFillIntegration(t *testing.T) {
 		t.Skip("VALET_CDP_URL not set")
 	}
 	f := &CDPFiller{}
+	loc, err := f.PageURL(context.Background(), ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("page: %s", loc)
 	res, err := f.Fill(context.Background(), ws,
-		map[string]FieldRef{"#username": {Field: "username"}, "#password": {Field: "password"}},
+		map[string]string{"username": "#username", "password": "#password"},
+		"",
 		map[string]string{"username": "u", "password": "p"})
 	if err != nil {
 		t.Fatal(err, res)
@@ -46,4 +54,31 @@ func TestFillIntegration(t *testing.T) {
 	if res.Status != StatusOK {
 		t.Fatalf("status %q: %s", res.Status, res.Detail)
 	}
+	if shot := os.Getenv("VALET_SCREENSHOT"); shot != "" {
+		saveScreenshot(t, f, ws, shot)
+	}
+}
+
+func saveScreenshot(t *testing.T, f *CDPFiller, ws, path string) {
+	t.Helper()
+	bctx, err := f.session(context.Background(), ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var png []byte
+	if err := chromedp.Run(bctx, chromedp.CaptureScreenshot(&png)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, png, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScreenshotIntegration(t *testing.T) {
+	ws := os.Getenv("VALET_CDP_URL")
+	shot := os.Getenv("VALET_SCREENSHOT")
+	if ws == "" || shot == "" {
+		t.Skip("VALET_CDP_URL/VALET_SCREENSHOT not set")
+	}
+	saveScreenshot(t, &CDPFiller{}, ws, shot)
 }

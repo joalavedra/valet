@@ -51,8 +51,13 @@ export VALET_MASTER_PASSWORD=changeme
 ./valet cred list                                             # handles + metadata only
 ./valet agent create my-bot                                   # prints agent token once
 ./valet server                                                # HTTP API on :14400
+
+export VALET_ADDR=http://127.0.0.1:14400                      # optional, this is the default
+export VALET_AGENT_TOKEN=<token from agent create>
 ./valet mcp                                                   # MCP tools over stdio
 ```
+
+Working browser-fill demo: [examples/login-demo](examples/login-demo).
 
 ## Dev
 
