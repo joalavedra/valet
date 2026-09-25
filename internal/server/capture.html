@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Valet — enter card</title>
+<script src="https://js.verygoodvault.com/vgs-collect/{{.CollectVersion}}/vgs-collect.js"></script>
+<style>
+  body { font-family: sans-serif; max-width: 380px; margin: 40px auto; }
+  .form-field { width: 100%; height: 40px; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 12px; }
+  .form-field input { border: none; width: 100%; height: 100%; padding: 0 8px; box-sizing: border-box; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  button { width: 100%; height: 40px; }
+  #msg { margin-top: 12px; }
+</style>
+</head>
+<body>
+<h2>Enter card details</h2>
+<p>This form is served by Valet; card data goes straight to the card vault (VGS), never through Valet.</p>
+<form id="f">
+  <div class="form-field"><input id="holder" placeholder="Card holder" autocomplete="cc-name"></div>
+  <div id="cc-number" class="form-field"></div>
+  <div class="row">
+    <div class="form-field"><input id="exp_month" placeholder="MM" inputmode="numeric" maxlength="2"></div>
+    <div class="form-field"><input id="exp_year" placeholder="YYYY" inputmode="numeric" maxlength="4"></div>
+    <div id="cc-cvc" class="form-field"></div>
+  </div>
+  <button type="submit" id="btn" disabled>Submit</button>
+  <div id="msg"></div>
+</form>
+<script>
+var state = {};
+var form = VGSCollect.create({{.VaultID}}, {{.Env}}, function(s) { state = s; document.getElementById('btn').disabled = false; });
+form.field('#cc-number', {name:'number', type:'card-number', placeholder:'Card number',
+  validations:['required','validCardNumber'], autoComplete:'cc-number',
+  tokenization:{format:'FPE_SIX_T_FOUR', storage:'PERSISTENT'}});
+form.field('#cc-cvc', {name:'cvc', type:'card-security-code', placeholder:'CVC',
+  validations:['required','validCardSecurityCode'], autoComplete:'cc-csc',
+  tokenization:{format:'NUM_LENGTH_PRESERVING', storage:'VOLATILE'}});
+
+function aliasFor(data, name) {
+  if (!data) return '';
+  var v = data[name];
+  if (typeof v === 'string') return v;
+  if (v && typeof v.alias === 'string') return v.alias;
+  if (v && v.aliases && v.aliases.length && typeof v.aliases[0].alias === 'string') return v.aliases[0].alias;
+  if (Array.isArray(data.data)) {
+    for (var i = 0; i < data.data.length; i++) {
+      var d = data.data[i];
+      if (d && d.name === name && d.alias) return d.alias;
+      if (d && d.aliases && d.aliases.length && d.aliases[0].alias) return d.aliases[0].alias;
+    }
+  }
+  return '';
+}
+function looksLikeAlias(a) {
+  if (!a) return false;
+  if (a.indexOf('tok_') === 0) return true;
+  var digits = a.replace(/\D/g, '');
+  if (digits.length === a.length) return false; // all-numeric is suspicious
+  return true;
+}
+document.getElementById('f').addEventListener('submit', function(e) {
+  e.preventDefault();
+  var msg = document.getElementById('msg');
+  msg.textContent = 'Tokenizing…';
+  form.tokenize(function(status, data) {
+    var num = aliasFor(data, 'number');
+    var cvc = aliasFor(data, 'cvc');
+    if (!looksLikeAlias(num)) {
+      msg.textContent = 'Tokenization returned unexpected data (keys: ' + (data ? Object.keys(data).join(',') : 'none') + '). No card data sent.';
+      return;
+    }
+    var last4 = '';
+    if (state && state.number && state.number.last4) last4 = state.number.last4;
+    fetch('/capture/{{.Token}}/complete', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({number:num, cvc:cvc,
+        exp_month:document.getElementById('exp_month').value,
+        exp_year:document.getElementById('exp_year').value,
+        holder:document.getElementById('holder').value,
+        last4:last4})})
+      .then(function(r){return r.json().then(function(j){return {r:r,j:j}})})
+      .then(function(x){ msg.textContent = x.r.ok ? 'Card captured. You can close this page.' : ('Error: ' + (x.j.error || x.r.status)); })
+      .catch(function(err){ msg.textContent = 'Error: ' + err; });
+  }, function(errors) {
+    msg.textContent = 'Tokenization failed: ' + JSON.stringify(errors && Object.keys(errors));
+  });
+});
+</script>
+</body>
+</html>

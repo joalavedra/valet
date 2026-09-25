@@ -741,3 +741,130 @@ func agentID(t *testing.T, st *store.SQLite, tok string) int64 {
 	}
 	return a.ID
 }
+
+// ---- capture endpoints ----
+
+func newCapture(t *testing.T, st *store.SQLite, label string, ttl time.Duration) string {
+	t.Helper()
+	tok := "cap-" + randToken(8)
+	if err := st.CreateCapture(&store.Capture{
+		Token: tok, Label: label, Metadata: `{"provider":"vgs"}`, ExpiresAt: time.Now().Add(ttl),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+func randToken(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = "abcdefghijklmnopqrstuvwxyz0123456789"[i%36]
+	}
+	return string(b)
+}
+
+func capReq(t *testing.T, srv *Server, method, path string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	var rd io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, rd)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestCapturePageRenders(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	tok := newCapture(t, st, "visa-x", time.Hour)
+	rec := capReq(t, srv, "GET", "/capture/"+tok, nil)
+	if rec.Code != 200 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "vgs-collect") || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("bad page: %s", rec.Header())
+	}
+}
+
+func TestCapturePageGone(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	tok := newCapture(t, st, "visa-x", -time.Hour) // expired
+	rec := capReq(t, srv, "GET", "/capture/"+tok, nil)
+	if rec.Code != 404 {
+		t.Fatalf("got %d", rec.Code)
+	}
+	rec = capReq(t, srv, "GET", "/capture/nope", nil)
+	if rec.Code != 404 {
+		t.Fatalf("got %d", rec.Code)
+	}
+}
+
+func TestCaptureCompleteHappy(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	tok := newCapture(t, st, "visa-live", time.Hour)
+	body := map[string]any{
+		"number": "tok_sandbox_pan1", "cvc": "tok_cvc1", "exp_month": "12",
+		"exp_year": "2030", "holder": "Test", "last4": "1111",
+	}
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", body)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "card://visa-live") {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	cred, err := st.GetCredential("card://visa-live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.Type != "card" || !strings.Contains(cred.Metadata, `"source":"collect"`) {
+		t.Fatalf("cred: %v %s", cred.Type, cred.Metadata)
+	}
+	// second POST → gone
+	rec = capReq(t, srv, "POST", "/capture/"+tok+"/complete", body)
+	if rec.Code != 404 && rec.Code != 410 {
+		t.Fatalf("second POST got %d", rec.Code)
+	}
+	// audit has a capture allow
+	audits, _ := st.ListAudit(10)
+	found := false
+	for _, a := range audits {
+		if a.Edge == "card" && a.Target == "capture" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no capture audit")
+	}
+}
+
+func TestCaptureCompleteRejectsPAN(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	tok := newCapture(t, st, "visa-x", time.Hour)
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "4111111111111111", "exp_month": "12", "exp_year": "2030", "holder": "T",
+	})
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "raw card data rejected") {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	// capture must remain unused
+	c, _ := st.GetCapture(tok)
+	if c.UsedAt != nil {
+		t.Fatal("capture consumed on reject")
+	}
+}
+
+func TestCaptureCompleteRejectsBadExp(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	tok := newCapture(t, st, "visa-x", time.Hour)
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_x", "exp_month": "13", "exp_year": "2030",
+	})
+	if rec.Code != 400 {
+		t.Fatalf("got %d", rec.Code)
+	}
+}

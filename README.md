@@ -146,6 +146,26 @@ upstream and returns `****1111` to the agent. If the route's filters include
 otherwise the payload bypasses the filter and the alias crosses the proxy
 unrevealed.
 
+## Capturing a card from the cardholder (Collect.js)
+
+For a PAN that never touches the operator or the CLI, generate a one-time
+capture link:
+
+```
+valet card capture --label visa-4242 --ttl 15m
+# → Open in the cardholder's browser: http://localhost:14400/capture/<token>
+```
+
+`GET /capture/<token>` renders an embedded page that loads VGS Collect.js
+3.4.0 (hosted iframes for number + CVC; expiry/holder are plain inputs) and
+calls `form.tokenize()` — the PAN goes straight to the VGS vault. The page
+posts only aliases to `POST /capture/<token>/complete`, which validates
+them (Luhn-valid PANs are rejected with `raw card data rejected`), claims
+the capture atomically, and stores a `card://<label>` credential identical
+to `cred add --type card`, so `pay` works unchanged. Links are single-use
+and expire; the base URL comes from `VALET_PUBLIC_URL` (default
+`http://<VALET_LISTEN>`). Audit rows carry edge `card`, target `capture`.
+
 ## Use from browser-use
 
 `sdks/python` ships a `valet-agent` package with a browser-use adapter:
