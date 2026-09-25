@@ -34,7 +34,8 @@ starts via supervisor (`hotdesk-valet`, priority 55) listening on
 ## Provision credentials
 
 All admin commands go through `valet-hotdesk exec <workspace> ...`, which
-runs `valet` inside the desktop's container:
+runs `valet` inside the desktop's container (waits up to 30s for the
+supervised server to be ready first):
 
 ```bash
 valet-hotdesk exec research agent create claude   # prints the agent token once
