@@ -21,3 +21,15 @@ jobs:
         run: go build ./...
       - name: test
         run: go test ./...
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install
+        run: pip install -e 'sdks/python[browser-use,dev]'
+      - name: pytest
+        run: pytest sdks/python

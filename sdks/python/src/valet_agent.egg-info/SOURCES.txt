@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+src/valet/__init__.py
+src/valet/browser_use.py
+src/valet/client.py
+src/valet_agent.egg-info/PKG-INFO
+src/valet_agent.egg-info/SOURCES.txt
+src/valet_agent.egg-info/dependency_links.txt
+src/valet_agent.egg-info/requires.txt
+src/valet_agent.egg-info/top_level.txt
+tests/test_browser_use.py
+tests/test_client.py

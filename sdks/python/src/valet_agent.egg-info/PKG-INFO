@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: valet-agent
+Version: 0.1.0
+Summary: Python SDK for Valet — the credential broker for AI agents
+License: Apache-2.0
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: httpx
+Provides-Extra: browser-use
+Requires-Dist: browser-use>=0.13; extra == "browser-use"
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-asyncio; extra == "dev"
+
+# valet-agent
+
+Python SDK for [Valet](https://github.com/joalavedra/valet) — agents hold
+handles, never secrets.
+
+```bash
+pip install 'valet-agent[browser-use]'   # adds the browser-use adapter
+```
+
+See the repo README for usage.
