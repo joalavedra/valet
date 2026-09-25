@@ -103,7 +103,9 @@ Env vars: `VGS_VAULT_ID` (the `tnt…` id — required, otherwise the provider
 isn't registered), `VGS_ENV` (default `sandbox`), `VGS_USERNAME`,
 `VGS_PASSWORD` (vault Access Credentials), `VGS_CA_FILE` (path to VGS's
 `sandbox.pem`/`live.pem` — the proxy is reached over TLS on
-`<vault>.<env>.verygoodproxy.com:8443`).
+`<vault>.<env>.verygoodproxy.com:8443`). The sandbox CA is bundled in the
+binary (and at `deploy/vgs/sandbox.pem`), so `VGS_CA_FILE` is only needed
+for `VGS_ENV=live`.
 
 Placeholders (stored as credential fields by `cred add --type card`):
 

@@ -113,7 +113,7 @@ func TestVGSLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := Do(context.Background(), staticProvider{rt: tr},
-		PayRequest{Method: "GET", URL: "https://echo.apps.verygood.systems/get"}, nil)
+		PayRequest{Method: "GET", URL: "https://httpbin.org/get"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

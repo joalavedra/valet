@@ -3,6 +3,7 @@ package card
 import (
 	"crypto/tls"
 	"crypto/x509"
+	_ "embed"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +16,14 @@ import (
 // detokenization happens proxy-side for upstream hosts that have an
 // Outbound Route configured in the VGS dashboard. TLS to the proxy requires
 // trusting VGS's environment CA (PEM file, VGS_CA_FILE).
+// sandboxPEM is VGS's public self-signed sandbox CA for *.sandbox.
+// verygoodproxy.com, embedded from the VGS docs (outbound-connection page).
+// A copy also lives at deploy/vgs/sandbox.pem for curl users. Live
+// environments must pass VGS_CA_FILE.
+//
+//go:embed vgs_sandbox.pem
+var sandboxPEM []byte
+
 type VGS struct {
 	VaultID  string
 	Env      string // e.g. "sandbox" or "live"
@@ -68,6 +77,8 @@ func (v *VGS) Transport() (http.RoundTripper, error) {
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("vgs: ca file is not PEM")
 		}
+	} else if env == "sandbox" {
+		pool.AppendCertsFromPEM(sandboxPEM)
 	}
 	return &http.Transport{
 		Proxy:           http.ProxyURL(proxy),
