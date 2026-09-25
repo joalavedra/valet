@@ -8,8 +8,8 @@
   body { font-family: sans-serif; max-width: 400px; margin: 40px auto; }
   label { display: block; font-size: 13px; margin-bottom: 4px; color: #333; }
   .form-field { height: 40px; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 14px; box-sizing: border-box; }
+  .form-field iframe { width: 100%; height: 100%; border: 0; display: block; }
   .form-field input { border: none; width: 100%; height: 100%; padding: 0 8px; box-sizing: border-box; }
-  .form-field iframe { display: block; }
   .row { display: flex; gap: 12px; }
   .row .cell { display: flex; flex-direction: column; }
   .cell-mm { flex: 0 0 5em; }
@@ -108,7 +108,11 @@ document.getElementById('f').addEventListener('submit', function(e) {
       msg.textContent = 'Tokenization failed: ' + (typeof errors === 'string' ? errors : 'network error');
       return;
     }
-    msg.textContent = 'Tokenization failed: ' + JSON.stringify(errors && Object.keys(errors));
+    if (errors && typeof errors === 'object' && !Object.keys(errors).length) {
+      msg.textContent = 'Please fill in all card fields.';
+      return;
+    }
+    msg.textContent = 'Tokenization failed: ' + (errors ? JSON.stringify(errors) : 'unknown error');
   });
 });
 </script>

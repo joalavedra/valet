@@ -156,6 +156,12 @@ valet card capture --label visa-4242 --ttl 15m
 # → Open in the cardholder's browser: http://localhost:14400/capture/<token>
 ```
 
+Prerequisite: one **Inbound Route** in the vault whose upstream is
+`https://<vault-id>.<env>.vault-api.verygoodvault.com` — Collect.js
+`tokenize()` posts through the vault's inbound proxy and fails with
+"Network Error" if no inbound route covers it. No `setRouteId` needed —
+a single inbound route is matched by host.
+
 `GET /capture/<token>` renders an embedded page that loads VGS Collect.js
 3.4.0 (hosted iframes for number + CVC; expiry/holder are plain inputs) and
 calls `form.tokenize()` — the PAN goes straight to the VGS vault. The page
