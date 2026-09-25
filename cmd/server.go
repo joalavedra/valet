@@ -86,6 +86,6 @@ func loadDEK(st store.Store) ([]byte, error) {
 
 func init() {
 	home, _ := os.UserHomeDir()
-	serverCmd.Flags().StringVar(&serverDB, "db", filepath.Join(home, ".valet", "valet.db"), "path to SQLite database")
+	rootCmd.PersistentFlags().StringVar(&serverDB, "db", filepath.Join(home, ".valet", "valet.db"), "path to SQLite database")
 	rootCmd.AddCommand(serverCmd)
 }

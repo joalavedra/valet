@@ -6,7 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -21,17 +25,25 @@ import (
 
 // Server holds dependencies for the HTTP API.
 type Server struct {
-	st     store.Store
-	issuer *grant.Issuer
-	chain  *audit.Chain
-	filler browser.Filler
-	dek    []byte
-	mux    *http.ServeMux
+	st       store.Store
+	issuer   *grant.Issuer
+	chain    *audit.Chain
+	filler   browser.Filler
+	dek      []byte
+	cdpAllow []string
+	mux      *http.ServeMux
 }
 
 // New builds the API mux.
 func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browser.Filler, dek []byte) *Server {
-	s := &Server{st: st, issuer: issuer, chain: chain, filler: filler, dek: dek, mux: http.NewServeMux()}
+	allow := strings.Split(os.Getenv("VALET_CDP_ALLOW"), ",")
+	if len(allow) == 1 && strings.TrimSpace(allow[0]) == "" {
+		allow = []string{"127.0.0.1", "localhost", "::1"}
+	}
+	for i := range allow {
+		allow[i] = strings.TrimSpace(allow[i])
+	}
+	s := &Server{st: st, issuer: issuer, chain: chain, filler: filler, dek: dek, cdpAllow: allow, mux: http.NewServeMux()}
 	s.mux.HandleFunc("GET /healthz", s.healthz)
 	s.mux.HandleFunc("GET /v1/handles", s.agentAuth(s.handles))
 	s.mux.HandleFunc("POST /v1/grants", s.agentAuth(s.createGrant))
@@ -159,9 +171,30 @@ func (s *Server) createGrant(w http.ResponseWriter, r *http.Request, a *store.Ag
 }
 
 type fillRequest struct {
-	Grant    string                      `json:"grant"`
-	CDPWSURL string                      `json:"cdp_ws_url"`
-	Mapping  map[string]browser.FieldRef `json:"mapping"`
+	GrantToken string            `json:"grant_token"`
+	CDPWSURL   string            `json:"cdp_ws_url"`
+	Mapping    map[string]string `json:"mapping"` // field -> CSS selector
+	Submit     string            `json:"submit"`  // optional submit selector
+}
+
+func (s *Server) auditDeny(agentID int64, handle, target, reason string) {
+	detail, _ := json.Marshal(map[string]string{"reason": reason})
+	_ = s.chain.Append(&store.AuditEntry{AgentID: agentID, Handle: handle, Edge: "browser", Target: target, Decision: "deny", Detail: string(detail)})
+}
+
+func (s *Server) cdpAllowed(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := u.Hostname()
+	port := u.Port()
+	for _, allowed := range s.cdpAllow {
+		if allowed == host || allowed == net.JoinHostPort(host, port) || (port == "" && allowed == host) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) browserFill(w http.ResponseWriter, r *http.Request, a *store.Agent) {
@@ -170,29 +203,97 @@ func (s *Server) browserFill(w http.ResponseWriter, r *http.Request, a *store.Ag
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
-	g, err := s.issuer.Consume(req.Grant, a.ID)
+	if !s.cdpAllowed(req.CDPWSURL) {
+		s.auditDeny(a.ID, "", "", "cdp_host_denied")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cdp host not allowed"})
+		return
+	}
+	g, err := s.issuer.Verify(req.GrantToken, a.ID)
 	if err != nil {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		reason, code := "grant_invalid", http.StatusForbidden
+		if errors.Is(err, grant.ErrExpired) {
+			reason, code = "grant_expired", http.StatusUnauthorized
+		} else if errors.Is(err, grant.ErrExhausted) {
+			reason = "grant_exhausted"
+		}
+		s.auditDeny(a.ID, "", "", reason)
+		writeJSON(w, code, map[string]string{"error": reason})
 		return
 	}
 	cred, err := s.st.GetCredential(g.Handle)
 	if err != nil {
+		s.auditDeny(a.ID, g.Handle, "", "grant_invalid")
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown handle"})
+		return
+	}
+	pageURL, err := s.filler.PageURL(r.Context(), req.CDPWSURL)
+	if err != nil {
+		slog.Debug("cdp connect failed", "error", err)
+		s.auditDeny(a.ID, g.Handle, "", "cdp_unreachable")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "cdp connect failed"})
+		return
+	}
+	u, parseErr := url.Parse(pageURL)
+	host := ""
+	if parseErr == nil && u != nil {
+		host = u.Hostname()
+	}
+	if host == "" {
+		s.auditDeny(a.ID, g.Handle, "", "no_page_url")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "no page url"})
+		return
+	}
+	var p policy.Policy
+	if err := json.Unmarshal([]byte(g.Policy), &p); err != nil {
+		s.auditDeny(a.ID, g.Handle, host, "grant_invalid")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant_invalid"})
+		return
+	}
+	d := policy.Evaluate(&p, &policy.GrantView{ExpiresAt: g.ExpiresAt, Uses: g.Uses, MaxUses: g.MaxUses}, policy.Request{Host: host, Now: time.Now()})
+	if !d.Allow {
+		s.auditDeny(a.ID, g.Handle, host, "host_denied")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host_denied"})
+		return
+	}
+	if _, err := s.issuer.Consume(req.GrantToken, a.ID); err != nil {
+		s.auditDeny(a.ID, g.Handle, host, "grant_exhausted")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant_exhausted"})
 		return
 	}
 	values, err := s.credValues(cred)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "credential decrypt failed"})
 		return
 	}
-	res, err := s.filler.Fill(r.Context(), req.CDPWSURL, req.Mapping, values)
+	defer func() {
+		for k := range values {
+			values[k] = ""
+		}
+	}()
+	if _, wantsOTP := req.Mapping["otp"]; wantsOTP && values["totp_seed"] != "" {
+		code, err := browser.TOTPCode(values["totp_seed"])
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "totp failed"})
+			return
+		}
+		values["otp"] = code
+		delete(values, "totp_seed")
+	}
+	res, err := s.filler.Fill(r.Context(), req.CDPWSURL, host, req.Mapping, req.Submit, values)
+	// Fill returns StatusHostMismatch together with an error; check it first.
+	if res.Status == browser.StatusHostMismatch {
+		s.auditDeny(a.ID, g.Handle, host, "host_denied")
+		writeJSON(w, http.StatusForbidden, map[string]string{"status": res.Status})
+		return
+	}
 	if err != nil {
-		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "browser", Target: cred.Site, Decision: "deny", Detail: "{}"})
-		writeJSON(w, http.StatusBadGateway, res)
+		slog.Debug("browser fill failed", "error", err)
+		s.auditDeny(a.ID, g.Handle, host, "fill_error")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fill failed", "status": res.Status})
 		return
 	}
-	_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "browser", Target: cred.Site, Decision: "allow", Detail: "{}"})
-	writeJSON(w, http.StatusOK, res)
+	_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "browser", Target: host, Decision: "allow", Detail: "{}"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": res.Status})
 }
 
 // credValues decrypts the credential payload into field->value pairs.

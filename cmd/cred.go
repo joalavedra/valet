@@ -20,6 +20,8 @@ import (
 
 var credAddType, credAddLabel, credAddSite string
 
+var stdinReader = bufio.NewReader(os.Stdin)
+
 func promptSecret(name string) (string, error) {
 	fmt.Fprintf(os.Stderr, "%s: ", name)
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -27,7 +29,7 @@ func promptSecret(name string) (string, error) {
 		fmt.Fprintln(os.Stderr)
 		return string(b), err
 	}
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, err := stdinReader.ReadString('\n')
 	return strings.TrimSpace(line), err
 }
 
