@@ -27,14 +27,15 @@ import (
 
 // Server holds dependencies for the HTTP API.
 type Server struct {
-	st       store.Store
-	issuer   *grant.Issuer
-	chain    *audit.Chain
-	filler   browser.Filler
-	egress   *egress.Client
-	dek      []byte
-	cdpAllow []string
-	mux      *http.ServeMux
+	st         store.Store
+	issuer     *grant.Issuer
+	chain      *audit.Chain
+	filler     browser.Filler
+	egress     *egress.Client
+	dek        []byte
+	cdpAllow   []string
+	cdpDefault string
+	mux        *http.ServeMux
 }
 
 // New builds the API mux.
@@ -56,6 +57,10 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 	s.mux.HandleFunc("GET /v1/audit", s.ownerAuth(s.listAudit))
 	return s
 }
+
+// SetCDPDefault sets the fallback CDP endpoint (e.g. VALET_CDP_URL) used
+// when a fill request omits cdp_ws_url.
+func (s *Server) SetCDPDefault(url string) { s.cdpDefault = url }
 
 // auditDeny records a denied edge attempt with a machine-readable reason.
 func (s *Server) auditDeny(agentID int64, handle, edge, target, reason string) {
@@ -222,8 +227,9 @@ func (s *Server) createGrant(w http.ResponseWriter, r *http.Request, a *store.Ag
 type fillRequest struct {
 	GrantToken string            `json:"grant_token"`
 	CDPWSURL   string            `json:"cdp_ws_url"`
-	Mapping    map[string]string `json:"mapping"` // field -> CSS selector
-	Submit     string            `json:"submit"`  // optional submit selector
+	PageURL    string            `json:"page_url"` // optional: pick the tab by its URL
+	Mapping    map[string]string `json:"mapping"`  // field -> CSS selector
+	Submit     string            `json:"submit"`   // optional submit selector
 }
 
 func (s *Server) cdpAllowed(raw string) bool {
@@ -247,10 +253,28 @@ func (s *Server) browserFill(w http.ResponseWriter, r *http.Request, a *store.Ag
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
-	if !s.cdpAllowed(req.CDPWSURL) {
+	cdpBase := req.CDPWSURL
+	if cdpBase == "" {
+		cdpBase = s.cdpDefault
+	}
+	if cdpBase == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cdp_ws_url required"})
+		return
+	}
+	if !s.cdpAllowed(cdpBase) {
 		s.auditDeny(a.ID, "", "browser", "", "cdp_host_denied")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cdp host not allowed"})
 		return
+	}
+	if req.PageURL != "" {
+		resolved, err := s.filler.ResolvePage(r.Context(), cdpBase, req.PageURL)
+		if err != nil {
+			slog.Debug("page resolve failed", "error", err)
+			s.auditDeny(a.ID, "", "browser", "", "page_not_found")
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "page not found"})
+			return
+		}
+		cdpBase = resolved
 	}
 	g, err := s.issuer.Verify(req.GrantToken, a.ID)
 	if err != nil {
@@ -270,7 +294,7 @@ func (s *Server) browserFill(w http.ResponseWriter, r *http.Request, a *store.Ag
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown handle"})
 		return
 	}
-	pageURL, err := s.filler.PageURL(r.Context(), req.CDPWSURL)
+	pageURL, err := s.filler.PageURL(r.Context(), cdpBase)
 	if err != nil {
 		slog.Debug("cdp connect failed", "error", err)
 		s.auditDeny(a.ID, g.Handle, "browser", "", "cdp_unreachable")
@@ -323,7 +347,7 @@ func (s *Server) browserFill(w http.ResponseWriter, r *http.Request, a *store.Ag
 		values["otp"] = code
 		delete(values, "totp_seed")
 	}
-	res, err := s.filler.Fill(r.Context(), req.CDPWSURL, host, req.Mapping, req.Submit, values)
+	res, err := s.filler.Fill(r.Context(), cdpBase, host, req.Mapping, req.Submit, values)
 	if err != nil {
 		slog.Debug("browser fill failed", "error", err)
 		s.auditDeny(a.ID, g.Handle, "browser", host, "fill_error")

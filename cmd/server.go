@@ -42,6 +42,7 @@ var serverCmd = &cobra.Command{
 			}
 		}
 		srv := server.New(st, iss, audit.New(st), &browser.CDPFiller{}, dek, eg)
+		srv.SetCDPDefault(os.Getenv("VALET_CDP_URL"))
 		fmt.Println("valet server listening on :14400")
 		return http.ListenAndServe(":14400", srv)
 	},

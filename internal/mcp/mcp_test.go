@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const testToken = "vlt_secret-token"
@@ -65,7 +69,7 @@ func TestBrowserFill(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
 	})
-	out, err := b.BrowserFill(context.Background(), "g.sig", "ws://x", map[string]string{"username": "#u"}, "#submit")
+	out, err := b.BrowserFill(context.Background(), "g.sig", "ws://x", map[string]string{"username": "#u"}, "#submit", "https://example.com/login")
 	if err != nil || out.(map[string]any)["status"] != "ok" {
 		t.Fatal(err, out)
 	}
@@ -126,5 +130,68 @@ func TestHTTPCallRoundTrip(t *testing.T) {
 	}
 	if h, ok := got["headers"].(map[string]any); !ok || h["X-A"] != "1" {
 		t.Fatalf("headers %v", got["headers"])
+	}
+}
+
+type stubBackend struct{}
+
+func (stubBackend) ListHandles(ctx context.Context) (any, error) {
+	return map[string]any{"handles": []any{map[string]any{"handle": "cred://x/y"}}}, nil
+}
+func (stubBackend) RequestGrant(ctx context.Context, handle, policyJSON, ttl string) (any, error) {
+	return nil, nil
+}
+func (stubBackend) BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit, pageURL string) (any, error) {
+	return nil, nil
+}
+func (stubBackend) HTTPCall(ctx context.Context, grant, method, url, headersJSON, body string) (any, error) {
+	return nil, nil
+}
+func (stubBackend) Pay(ctx context.Context, grant, merchant string, amount int64, currency, rail string) (any, error) {
+	return nil, nil
+}
+
+func TestRunHTTP(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	go func() { _ = RunHTTP(ctx, stubBackend{}, addr) }()
+	var client *mcp.Client
+	var cs *mcp.ClientSession
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		client = mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0.1"}, nil)
+		cs, err = client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: "http://" + addr + "/mcp"}, nil)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	defer cs.Close()
+	tools, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, tl := range tools.Tools {
+		names[tl.Name] = true
+	}
+	if !names["list_handles"] {
+		t.Fatalf("tools: %v", names)
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_handles"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "cred://x/y") {
+		t.Fatalf("result: %+v", res.Content[0])
 	}
 }

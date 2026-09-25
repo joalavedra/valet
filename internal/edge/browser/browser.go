@@ -38,6 +38,9 @@ const (
 // Filler types values into selectors in an existing browser session.
 type Filler interface {
 	PageURL(ctx context.Context, cdpWSURL string) (string, error)
+	// ResolvePage returns a page-level devtools ws URL for the target whose
+	// URL matches pageURL, or an error when no unique target matches.
+	ResolvePage(ctx context.Context, cdpURL, pageURL string) (string, error)
 	Fill(ctx context.Context, cdpWSURL, expectedHost string, mapping map[string]string, submit string, values map[string]string) (Result, error)
 }
 
@@ -101,14 +104,73 @@ func (f *CDPFiller) evictIdle() {
 	}
 }
 
+// cdpHTTPBase maps a cdp base URL (ws, wss, http, https) to the http(s) URL
+// used for /json queries, plus the ws scheme for building page-level URLs.
+func cdpHTTPBase(raw string) (base, wsScheme string, err error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", "", fmt.Errorf("invalid cdp url")
+	}
+	switch u.Scheme {
+	case "ws", "http":
+		return "http://" + u.Host, "ws", nil
+	case "wss", "https":
+		return "https://" + u.Host, "wss", nil
+	default:
+		return "", "", fmt.Errorf("unsupported cdp url scheme %q", u.Scheme)
+	}
+}
+
+// listPages returns page targets advertised by the browser's /json endpoint.
+func (f *CDPFiller) listPages(ctx context.Context, cdpURL string) (wsScheme, hostport string, pages []struct {
+	ID  string
+	URL string
+}, err error) {
+	base, scheme, err := cdpHTTPBase(cdpURL)
+	if err != nil {
+		return "", "", nil, err
+	}
+	u, err := url.Parse(cdpURL)
+	if err != nil {
+		return "", "", nil, err
+	}
+	var targets []struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+		URL  string `json:"url"`
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/json", nil)
+	if err != nil {
+		return "", "", nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "", "", nil, fmt.Errorf("cdp status %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
+		return "", "", nil, err
+	}
+	pages = make([]struct{ ID, URL string }, 0)
+	for _, t := range targets {
+		if t.Type == "page" {
+			pages = append(pages, struct{ ID, URL string }{t.ID, t.URL})
+		}
+	}
+	return scheme, u.Host, pages, nil
+}
+
 func debugTargets(ctx context.Context, wsURL string) (browserWS, pageID, pageURL string, err error) {
 	u, err := url.Parse(wsURL)
 	if err != nil || u.Host == "" {
 		return "", "", "", fmt.Errorf("invalid cdp websocket url")
 	}
-	base := "http://" + u.Host
-	if u.Scheme == "wss" {
-		base = "https://" + u.Host
+	base, _, err := cdpHTTPBase(wsURL)
+	if err != nil {
+		return "", "", "", err
 	}
 	get := func(path string, v any) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
@@ -226,6 +288,105 @@ func (f *CDPFiller) PageURL(ctx context.Context, ws string) (string, error) {
 		return "", err
 	}
 	return pageURL, nil
+}
+
+// normalizePageURL drops the fragment and trailing slash for comparison.
+func normalizePageURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	u.Fragment = ""
+	u.RawFragment = ""
+	s := u.String()
+	return strings.TrimRight(s, "/")
+}
+
+// samePageNoQuery compares scheme, host and path, ignoring query and fragment.
+func samePageNoQuery(a, b string) bool {
+	ua, err1 := url.Parse(a)
+	ub, err2 := url.Parse(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return ua.Scheme == ub.Scheme && ua.Host == ub.Host && ua.Path == ub.Path
+}
+
+// ResolvePage picks the page target whose URL matches pageURL and returns its
+// page-level ws URL. Cached sessions count as candidates too, since attached
+// pages can disappear from /json in headless Chrome.
+func (f *CDPFiller) ResolvePage(ctx context.Context, cdpURL, pageURL string) (string, error) {
+	scheme, hostport, pages, err := f.listPages(ctx, cdpURL)
+	if err != nil {
+		return "", err
+	}
+	type cand struct{ ws, url string }
+	cands := make([]cand, 0, len(pages))
+	for _, p := range pages {
+		cands = append(cands, cand{ws: scheme + "://" + hostport + "/devtools/page/" + p.ID, url: p.URL})
+	}
+	f.mu.Lock()
+	cached := make([]cand, 0, len(f.sess))
+	for ws := range f.sess {
+		cached = append(cached, cand{ws: ws})
+	}
+	f.mu.Unlock()
+	for _, c := range cached {
+		// Attached pages may be hidden from /json; ask the page itself.
+		var loc string
+		f.mu.Lock()
+		se := f.sess[c.ws]
+		f.mu.Unlock()
+		if se == nil {
+			continue
+		}
+		lctx, cancel := context.WithTimeout(se.ctx, 3*time.Second)
+		if err := chromedp.Run(lctx, chromedp.Location(&loc)); err == nil {
+			c.url = loc
+		}
+		cancel()
+		seen := false
+		for _, e := range cands {
+			if e.ws == c.ws {
+				seen = true
+			}
+		}
+		if !seen {
+			cands = append(cands, c)
+		}
+	}
+	want := normalizePageURL(pageURL)
+	var matches []cand
+	for _, c := range cands {
+		if normalizePageURL(c.url) == want {
+			matches = append(matches, c)
+		}
+	}
+	if len(matches) == 0 {
+		for _, c := range cands {
+			if samePageNoQuery(c.url, pageURL) {
+				matches = append(matches, c)
+			}
+		}
+	}
+	if len(matches) == 0 {
+		wantHost := ""
+		if u, err := url.Parse(pageURL); err == nil {
+			wantHost = u.Hostname()
+		}
+		for _, c := range cands {
+			if u, err := url.Parse(c.url); err == nil && u.Hostname() == wantHost {
+				matches = append(matches, c)
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("page not found")
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("ambiguous page")
+	}
+	return matches[0].ws, nil
 }
 
 // classifyOutcome is pure so login outcome behavior can be table-tested.

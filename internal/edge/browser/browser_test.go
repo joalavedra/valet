@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/chromedp/chromedp"
@@ -128,4 +130,69 @@ func TestScreenshotIntegration(t *testing.T) {
 		t.Skip("VALET_CDP_URL/VALET_SCREENSHOT not set")
 	}
 	saveScreenshot(t, &CDPFiller{}, ws, shot)
+}
+
+func fakeCDP(t *testing.T, pages []map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/json/version":
+			json.NewEncoder(w).Encode(map[string]any{"webSocketDebuggerUrl": "ws://x/devtools/browser/1"})
+		case "/json":
+			json.NewEncoder(w).Encode(pages)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func page(url, id string) map[string]any {
+	return map[string]any{"id": id, "type": "page", "url": url}
+}
+
+func TestResolvePage(t *testing.T) {
+	ts := fakeCDP(t, []map[string]any{
+		page("https://a.example.com/login", "P1"),
+		page("https://a.example.com/login?tab=2", "P2"),
+		page("https://b.example.com/", "P3"),
+	})
+	defer ts.Close()
+	f := &CDPFiller{}
+	base := ts.URL // http:// base → ws:// result
+
+	got, err := f.ResolvePage(context.Background(), base, "https://a.example.com/login")
+	if err != nil || !strings.HasSuffix(got, "/devtools/page/P1") {
+		t.Fatalf("exact match: %q %v", got, err)
+	}
+	if !strings.HasPrefix(got, "ws://") {
+		t.Fatalf("expected ws scheme, got %q", got)
+	}
+	// Fragment/trailing-slash normalization still exact.
+	got, err = f.ResolvePage(context.Background(), base, "https://b.example.com/#top")
+	if err != nil || !strings.HasSuffix(got, "/devtools/page/P3") {
+		t.Fatalf("normalized match: %q %v", got, err)
+	}
+	// Query-only difference falls back to scheme+host+path match, but both
+	// P1 and P2 share that path → ambiguous.
+	if _, err = f.ResolvePage(context.Background(), base, "https://a.example.com/login?x=9"); err == nil {
+		t.Fatal("expected ambiguous error")
+	}
+	// Unknown page.
+	if _, err = f.ResolvePage(context.Background(), base, "https://zzz.example.com/x"); err == nil {
+		t.Fatal("expected page not found")
+	}
+}
+
+func TestResolvePageHostFallback(t *testing.T) {
+	ts := fakeCDP(t, []map[string]any{
+		page("https://c.example.com/other", "Q1"),
+		page("https://d.example.com/", "Q2"),
+	})
+	defer ts.Close()
+	f := &CDPFiller{}
+	// Only one page on the hostname → unique-host fallback.
+	got, err := f.ResolvePage(context.Background(), ts.URL, "https://c.example.com/nowhere")
+	if err != nil || !strings.HasSuffix(got, "/devtools/page/Q1") {
+		t.Fatalf("host fallback: %q %v", got, err)
+	}
 }

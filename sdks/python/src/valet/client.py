@@ -78,13 +78,20 @@ class ValetClient:
     async def browser_fill(
         self,
         grant_token: str,
-        cdp_ws_url: str,
-        mapping: dict[str, str],
+        cdp_ws_url: str | None = None,
+        mapping: dict[str, str] | None = None,
         submit: str | None = None,
+        page_url: str | None = None,
     ) -> dict:
-        body: dict[str, Any] = {"grant_token": grant_token, "cdp_ws_url": cdp_ws_url, "mapping": mapping}
+        body: dict[str, Any] = {"grant_token": grant_token}
+        if cdp_ws_url is not None:
+            body["cdp_ws_url"] = cdp_ws_url
+        if mapping is not None:
+            body["mapping"] = mapping
         if submit is not None:
             body["submit"] = submit
+        if page_url is not None:
+            body["page_url"] = page_url
         return await self._request("POST", "/v1/edge/browser/fill", body)
 
     async def http_call(
