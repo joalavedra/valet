@@ -108,16 +108,19 @@ func TestClassifyOutcome(t *testing.T) {
 		before, after          string
 		password, otp, captcha bool
 		text, want             string
+		filledOTP              bool
 	}{
-		{"redirect", "/login", "/home", true, false, false, "", StatusOK},
-		{"password gone", "/login", "/login", false, false, false, "", StatusOK},
-		{"otp", "/login", "/login", true, true, false, "", StatusNeedOTP},
-		{"captcha", "/login", "/login", true, false, true, "", StatusCaptcha},
-		{"wrong", "/login", "/login", true, false, false, "Invalid username or password", StatusWrongPassword},
-		{"unknown", "/login", "/login", true, false, false, "Welcome", StatusUnknown},
+		{"redirect", "/login", "/home", true, false, false, "", StatusOK, false},
+		{"password gone", "/login", "/login", false, false, false, "", StatusOK, false},
+		{"otp", "/login", "/login", true, true, false, "", StatusNeedOTP, false},
+		{"otp filled, same page", "/login", "/login", true, true, false, "", StatusUnknown, true},
+		{"otp filled, navigated", "/login", "/totp", true, true, false, "", StatusNeedOTP, true},
+		{"captcha", "/login", "/login", true, false, true, "", StatusCaptcha, false},
+		{"wrong", "/login", "/login", true, false, false, "Invalid username or password", StatusWrongPassword, false},
+		{"unknown", "/login", "/login", true, false, false, "Welcome", StatusUnknown, false},
 	}
 	for _, tc := range tests {
-		if got := classifyOutcome(tc.before, tc.after, tc.password, tc.otp, tc.captcha, tc.text); got != tc.want {
+		if got := classifyOutcome(tc.before, tc.after, tc.password, tc.otp, tc.captcha, tc.text, tc.filledOTP); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
 	}

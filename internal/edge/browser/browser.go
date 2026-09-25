@@ -390,8 +390,11 @@ func (f *CDPFiller) ResolvePage(ctx context.Context, cdpURL, pageURL string) (st
 }
 
 // classifyOutcome is pure so login outcome behavior can be table-tested.
-func classifyOutcome(urlBefore, urlAfter string, hasPassword, hasOTP, hasCaptcha bool, text string) string {
-	if hasOTP {
+func classifyOutcome(urlBefore, urlAfter string, hasPassword, hasOTP, hasCaptcha bool, text string, filledOTP bool) string {
+	// When we just typed the OTP ourselves, an OTP field on the unchanged
+	// page is the form we filled, not a challenge — keep polling and let
+	// the wrong_password/unknown checks settle it at the deadline.
+	if hasOTP && !(filledOTP && urlAfter == urlBefore) {
 		return StatusNeedOTP
 	}
 	if hasCaptcha {
@@ -473,7 +476,8 @@ func (f *CDPFiller) Fill(ctx context.Context, ws, expectedHost string, mapping m
 		if err := chromedp.Run(deadline, chromedp.Location(&after), chromedp.Evaluate(`document.body.innerText`, &text), chromedp.Evaluate(`!!document.querySelector('input[type="password"]')`, &hasPassword), chromedp.Evaluate(`!!document.querySelector('input[autocomplete="one-time-code"], input[name*="otp" i], input[name*="code" i]')`, &hasOTP), chromedp.Evaluate(`!!document.querySelector('iframe[src*="captcha" i], .g-recaptcha, .h-captcha')`, &hasCaptcha)); err != nil {
 			return res, err
 		}
-		status := classifyOutcome(before, after, hasPassword, hasOTP, hasCaptcha, text)
+		_, filledOTP := mapping["otp"]
+		status := classifyOutcome(before, after, hasPassword, hasOTP, hasCaptcha, text, filledOTP)
 		// Keep polling on wrong_password/unknown: navigation can still be
 		// in flight, and failure keywords may appear in unrelated page
 		// text while the old DOM is still up.
