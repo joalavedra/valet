@@ -26,7 +26,7 @@ def fake_session(url="https://the-internet.herokuapp.com/login", cdp="http://127
 
 
 def client_with(handler):
-    c = ValetClient("http://valet.test", token=TOKEN)
+    c = ValetClient("https://valet.test", token=TOKEN)
     c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return c
 

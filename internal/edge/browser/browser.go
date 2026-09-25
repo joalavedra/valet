@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -151,7 +152,7 @@ func (f *CDPFiller) listPages(ctx context.Context, cdpURL string) (wsScheme, hos
 	if resp.StatusCode >= 400 {
 		return "", "", nil, fmt.Errorf("cdp status %d", resp.StatusCode)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&targets); err != nil {
 		return "", "", nil, err
 	}
 	pages = make([]struct{ ID, URL string }, 0)
@@ -284,10 +285,32 @@ func (f *CDPFiller) session(ctx context.Context, ws string) (context.Context, er
 // PageURL returns the current page URL.
 func (f *CDPFiller) PageURL(ctx context.Context, ws string) (string, error) {
 	_, _, pageURL, err := debugTargets(ctx, ws)
-	if err != nil {
+	if err == nil {
+		return pageURL, nil
+	}
+	// Attached pages vanish from /json in headless Chrome; ask the cached
+	// session for its location instead of failing.
+	f.mu.Lock()
+	se := f.sess[ws]
+	f.mu.Unlock()
+	if se == nil || se.ctx == nil {
 		return "", err
 	}
-	return pageURL, nil
+	var loc string
+	lctx, cancel := context.WithTimeout(se.ctx, 3*time.Second)
+	defer cancel()
+	if lerr := chromedp.Run(lctx, chromedp.Location(&loc)); lerr != nil {
+		return "", err
+	}
+	return loc, nil
+}
+
+// pageTargetID extracts the trailing segment of a devtools/page/ ws URL.
+func pageTargetID(ws string) string {
+	if i := strings.LastIndex(ws, "/"); i >= 0 {
+		return ws[i+1:]
+	}
+	return ws
 }
 
 // normalizePageURL drops the fragment and trailing slash for comparison.
@@ -332,12 +355,16 @@ func (f *CDPFiller) ResolvePage(ctx context.Context, cdpURL, pageURL string) (st
 	}
 	f.mu.Unlock()
 	for _, c := range cached {
+		// Only sessions against this CDP endpoint count as candidates.
+		if u, err := url.Parse(c.ws); err != nil || u.Host != hostport {
+			continue
+		}
 		// Attached pages may be hidden from /json; ask the page itself.
 		var loc string
 		f.mu.Lock()
 		se := f.sess[c.ws]
 		f.mu.Unlock()
-		if se == nil {
+		if se == nil || se.ctx == nil {
 			continue
 		}
 		lctx, cancel := context.WithTimeout(se.ctx, 3*time.Second)
@@ -347,7 +374,7 @@ func (f *CDPFiller) ResolvePage(ctx context.Context, cdpURL, pageURL string) (st
 		cancel()
 		seen := false
 		for _, e := range cands {
-			if e.ws == c.ws {
+			if pageTargetID(e.ws) == pageTargetID(c.ws) {
 				seen = true
 			}
 		}
@@ -390,8 +417,11 @@ func (f *CDPFiller) ResolvePage(ctx context.Context, cdpURL, pageURL string) (st
 }
 
 // classifyOutcome is pure so login outcome behavior can be table-tested.
-func classifyOutcome(urlBefore, urlAfter string, hasPassword, hasOTP, hasCaptcha bool, text string) string {
-	if hasOTP {
+func classifyOutcome(urlBefore, urlAfter string, hasPassword, hasOTP, hasCaptcha bool, text string, filledOTP bool) string {
+	// When we just typed the OTP ourselves, an OTP field on the unchanged
+	// page is the form we filled, not a challenge — keep polling and let
+	// the wrong_password/unknown checks settle it at the deadline.
+	if hasOTP && !(filledOTP && urlAfter == urlBefore) {
 		return StatusNeedOTP
 	}
 	if hasCaptcha {
@@ -473,7 +503,8 @@ func (f *CDPFiller) Fill(ctx context.Context, ws, expectedHost string, mapping m
 		if err := chromedp.Run(deadline, chromedp.Location(&after), chromedp.Evaluate(`document.body.innerText`, &text), chromedp.Evaluate(`!!document.querySelector('input[type="password"]')`, &hasPassword), chromedp.Evaluate(`!!document.querySelector('input[autocomplete="one-time-code"], input[name*="otp" i], input[name*="code" i]')`, &hasOTP), chromedp.Evaluate(`!!document.querySelector('iframe[src*="captcha" i], .g-recaptcha, .h-captcha')`, &hasCaptcha)); err != nil {
 			return res, err
 		}
-		status := classifyOutcome(before, after, hasPassword, hasOTP, hasCaptcha, text)
+		_, filledOTP := mapping["otp"]
+		status := classifyOutcome(before, after, hasPassword, hasOTP, hasCaptcha, text, filledOTP)
 		// Keep polling on wrong_password/unknown: navigation can still be
 		// in flight, and failure keywords may appear in unrelated page
 		// text while the old DOM is still up.

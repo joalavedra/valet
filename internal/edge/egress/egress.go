@@ -83,7 +83,10 @@ func New(cfg *Config) (*Client, error) {
 				Proxy:           http.ProxyURL(proxy),
 				TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
 			},
-			Timeout: 30 * time.Second,
+			// Redirects go back to the agent; following them would send the
+			// request to a host the grant policy never evaluated.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			Timeout:       30 * time.Second,
 		},
 	}, nil
 }
@@ -166,7 +169,7 @@ var hopHeaders = map[string]bool{
 
 var respHeaders = map[string]bool{
 	"content-type": true, "content-length": true, "date": true,
-	"x-request-id": true, "retry-after": true,
+	"x-request-id": true, "retry-after": true, "location": true,
 }
 
 // Do forwards req through the proxy and returns the filtered response.
@@ -188,9 +191,16 @@ func (c *Client) Do(ctx context.Context, in Request) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Headers named by the agent's Connection header are also hop-by-hop.
+	connNames := map[string]bool{}
+	for _, tok := range strings.Split(in.Headers["Connection"]+","+in.Headers["connection"], ",") {
+		if t := strings.ToLower(strings.TrimSpace(tok)); t != "" {
+			connNames[t] = true
+		}
+	}
 	for k, v := range in.Headers {
 		lk := strings.ToLower(k)
-		if hopHeaders[lk] || strings.HasPrefix(lk, "proxy-") {
+		if hopHeaders[lk] || connNames[lk] || strings.HasPrefix(lk, "proxy-") {
 			continue
 		}
 		req.Header.Set(k, v)
@@ -212,6 +222,9 @@ func (c *Client) Do(ctx context.Context, in Request) (*Response, error) {
 	for k, vv := range resp.Header {
 		lk := strings.ToLower(k)
 		if respHeaders[lk] || strings.HasPrefix(lk, "x-ratelimit-") {
+			if out.Truncated && lk == "content-length" {
+				continue
+			}
 			out.Headers[k] = strings.Join(vv, ", ")
 		}
 	}

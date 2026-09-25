@@ -108,16 +108,19 @@ func TestClassifyOutcome(t *testing.T) {
 		before, after          string
 		password, otp, captcha bool
 		text, want             string
+		filledOTP              bool
 	}{
-		{"redirect", "/login", "/home", true, false, false, "", StatusOK},
-		{"password gone", "/login", "/login", false, false, false, "", StatusOK},
-		{"otp", "/login", "/login", true, true, false, "", StatusNeedOTP},
-		{"captcha", "/login", "/login", true, false, true, "", StatusCaptcha},
-		{"wrong", "/login", "/login", true, false, false, "Invalid username or password", StatusWrongPassword},
-		{"unknown", "/login", "/login", true, false, false, "Welcome", StatusUnknown},
+		{"redirect", "/login", "/home", true, false, false, "", StatusOK, false},
+		{"password gone", "/login", "/login", false, false, false, "", StatusOK, false},
+		{"otp", "/login", "/login", true, true, false, "", StatusNeedOTP, false},
+		{"otp filled, same page", "/login", "/login", true, true, false, "", StatusUnknown, true},
+		{"otp filled, navigated", "/login", "/totp", true, true, false, "", StatusNeedOTP, true},
+		{"captcha", "/login", "/login", true, false, true, "", StatusCaptcha, false},
+		{"wrong", "/login", "/login", true, false, false, "Invalid username or password", StatusWrongPassword, false},
+		{"unknown", "/login", "/login", true, false, false, "Welcome", StatusUnknown, false},
 	}
 	for _, tc := range tests {
-		if got := classifyOutcome(tc.before, tc.after, tc.password, tc.otp, tc.captcha, tc.text); got != tc.want {
+		if got := classifyOutcome(tc.before, tc.after, tc.password, tc.otp, tc.captcha, tc.text, tc.filledOTP); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
 	}
@@ -194,5 +197,26 @@ func TestResolvePageHostFallback(t *testing.T) {
 	got, err := f.ResolvePage(context.Background(), ts.URL, "https://c.example.com/nowhere")
 	if err != nil || !strings.HasSuffix(got, "/devtools/page/Q1") {
 		t.Fatalf("host fallback: %q %v", got, err)
+	}
+}
+
+func TestPageTargetIDDedup(t *testing.T) {
+	if pageTargetID("ws://h:9/devtools/page/P1") != "P1" {
+		t.Fatal("bad id")
+	}
+	ts := fakeCDP(t, []map[string]any{page("https://a.example.com/login", "P1")})
+	defer ts.Close()
+	hostport := strings.TrimPrefix(ts.URL, "http://")
+	f := &CDPFiller{sess: map[string]*sessionEntry{
+		// Same target id as /json's P1 → must dedupe, not double-count.
+		"ws://" + hostport + "/devtools/page/P1": {},
+	}}
+	got, err := f.ResolvePage(context.Background(), ts.URL, "https://a.example.com/login")
+	if err != nil || !strings.HasSuffix(got, "/devtools/page/P1") {
+		t.Fatalf("dedup resolve: %q %v", got, err)
+	}
+	// A cached session on a different endpoint must not match its own host.
+	if _, err := f.ResolvePage(context.Background(), ts.URL, "https://only.example.com/"); err == nil {
+		t.Fatal("expected not found")
 	}
 }

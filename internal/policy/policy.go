@@ -71,6 +71,10 @@ func globMatch(pattern, value string) bool {
 	if ok, _ := path.Match(pattern, value); ok {
 		return true
 	}
+	// path.Match's * doesn't cross "/"; treat a trailing /* as a subtree.
+	if strings.HasSuffix(pattern, "/*") && strings.HasPrefix(value, pattern[:len(pattern)-1]) {
+		return true
+	}
 	if strings.HasPrefix(pattern, "*.") && (value == pattern[2:] || strings.HasSuffix(value, pattern[1:])) {
 		return true
 	}

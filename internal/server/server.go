@@ -253,6 +253,10 @@ func (s *Server) browserFill(w http.ResponseWriter, r *http.Request, a *store.Ag
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
+	if len(req.Mapping) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mapping required"})
+		return
+	}
 	cdpBase := req.CDPWSURL
 	if cdpBase == "" {
 		cdpBase = s.cdpDefault
@@ -348,15 +352,16 @@ func (s *Server) browserFill(w http.ResponseWriter, r *http.Request, a *store.Ag
 		delete(values, "totp_seed")
 	}
 	res, err := s.filler.Fill(r.Context(), cdpBase, host, req.Mapping, req.Submit, values)
+	// Fill returns StatusHostMismatch together with an error; check it first.
+	if res.Status == browser.StatusHostMismatch {
+		s.auditDeny(a.ID, g.Handle, "browser", host, "host_denied")
+		writeJSON(w, http.StatusForbidden, map[string]string{"status": res.Status})
+		return
+	}
 	if err != nil {
 		slog.Debug("browser fill failed", "error", err)
 		s.auditDeny(a.ID, g.Handle, "browser", host, "fill_error")
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fill failed", "status": res.Status})
-		return
-	}
-	if res.Status == browser.StatusHostMismatch {
-		s.auditDeny(a.ID, g.Handle, "browser", host, "host_denied")
-		writeJSON(w, http.StatusForbidden, map[string]string{"status": res.Status})
 		return
 	}
 	_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "browser", Target: host, Decision: "allow", Detail: "{}"})
