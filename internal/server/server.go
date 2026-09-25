@@ -197,6 +197,8 @@ type captureCompleteRequest struct {
 	Last4    string `json:"last4"`
 }
 
+var tokAliasRE = regexp.MustCompile(`^tok_[A-Za-z0-9_]+$`)
+
 func luhnPan(s string) bool {
 	var digits []byte
 	for i := 0; i < len(s); i++ {
@@ -238,7 +240,11 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	if req.Number == "" || luhnPan(req.Number) || (req.CVC != "" && luhnPan(req.CVC)) {
+	// Only UUID-format aliases (tok_…) are accepted — raw PANs or
+	// format-preserving aliases (which are themselves Luhn-valid PANs)
+	// are rejected. Luhn check kept as belt-and-braces.
+	if !tokAliasRE.MatchString(req.Number) || luhnPan(req.Number) ||
+		(req.CVC != "" && (!tokAliasRE.MatchString(req.CVC) || luhnPan(req.CVC))) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "raw card data rejected"})
 		return
 	}

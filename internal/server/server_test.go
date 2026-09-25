@@ -868,3 +868,23 @@ func TestCaptureCompleteRejectsBadExp(t *testing.T) {
 		t.Fatalf("got %d", rec.Code)
 	}
 }
+
+func TestCaptureCompleteRejectsNonTokAlias(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	tok := newCapture(t, st, "visa-x", time.Hour)
+	// A FPE format-preserving alias is a Luhn-valid PAN — must be rejected.
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "4111112771441111", "exp_month": "12", "exp_year": "2030",
+	})
+	if rec.Code != 400 {
+		t.Fatalf("FPE alias accepted: %d %s", rec.Code, rec.Body)
+	}
+	// A non-tok_ non-numeric string is rejected too.
+	rec = capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "not-an-alias", "exp_month": "12", "exp_year": "2030",
+	})
+	if rec.Code != 400 {
+		t.Fatalf("non-tok string accepted: %d %s", rec.Code, rec.Body)
+	}
+}

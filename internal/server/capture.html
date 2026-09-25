@@ -49,10 +49,10 @@ var state = {};
 var form = VGSCollect.create({{.VaultID}}, {{.Env}}, function(s) { state = s; document.getElementById('btn').disabled = false; });
 form.field('#cc-number', {name:'number', type:'card-number', placeholder:'Card number',
   validations:['required','validCardNumber'], autoComplete:'cc-number',
-  tokenization:{format:'FPE_SIX_T_FOUR', storage:'PERSISTENT'}});
+  tokenization:{format:'UUID', storage:'PERSISTENT'}});
 form.field('#cc-cvc', {name:'cvc', type:'card-security-code', placeholder:'CVC',
   validations:['required','validCardSecurityCode'], autoComplete:'cc-csc',
-  tokenization:{format:'NUM_LENGTH_PRESERVING', storage:'VOLATILE'}});
+  tokenization:{format:'UUID', storage:'VOLATILE'}});
 
 function aliasFor(data, name) {
   if (!data) return '';
@@ -70,11 +70,7 @@ function aliasFor(data, name) {
   return '';
 }
 function looksLikeAlias(a) {
-  if (!a) return false;
-  if (a.indexOf('tok_') === 0) return true;
-  var digits = a.replace(/\D/g, '');
-  if (digits.length === a.length) return false; // all-numeric is suspicious
-  return true;
+  return typeof a === 'string' && a.indexOf('tok_') === 0;
 }
 document.getElementById('f').addEventListener('submit', function(e) {
   e.preventDefault();
