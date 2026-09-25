@@ -1,0 +1,19 @@
+# Binaries
+valet
+*.exe
+*.out
+coverage.out
+
+# Data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Go
+/vendor/
+
+# Editors
+.idea/
+.vscode/
+*.swp
