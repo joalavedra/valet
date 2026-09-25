@@ -36,7 +36,7 @@ case "${1:-}" in
     shift
     ws="${1:?workspace name required}"
     docker exec -i -u cua -e "VALET_AGENT_TOKEN=${VALET_AGENT_TOKEN:?set VALET_AGENT_TOKEN}" \
-      "$(container "$ws")" /usr/local/bin/valet mcp
+      "$(container "$ws")" bash -c 'for _ in $(seq 1 60); do curl -fs http://127.0.0.1:14400/healthz >/dev/null 2>&1 && exec /usr/local/bin/valet mcp; sleep 0.5; done; echo "valet server not ready" >&2; exit 1'
     ;;
   ""|-h|--help|help)
     usage
