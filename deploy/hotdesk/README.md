@@ -54,7 +54,13 @@ valet-hotdesk exec research cred add --type login --site the-internet.herokuapp.
 
 Secrets are encrypted at rest in the desktop's `/home/cua` volume (master
 key in `/home/cua/.valet/master.key`) — they're part of the volume, so
-they ride along in hotdesk checkpoints and clones.
+they ride along in hotdesk checkpoints and clones. This image runs Valet
+as the same `cua` user as the agent, and `cua` has passwordless sudo, so
+an agent that goes looking can read the key: Valet keeps secrets out of
+prompts, transcripts and logs, it does not hide them from a hostile agent
+with root in the guest. Running Valet outside the desktop container (or
+in TEE mode) is the complete fix; the upstream hotdesk integration
+(`HOTDESK_VALET=1`) at least runs it as a dedicated `valet` user.
 
 ## Connect an agent
 
