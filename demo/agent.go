@@ -157,26 +157,40 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 			"merchants": []string{merchant},
 		},
 	}
-	// If this conversation already has a live pending approval, surface that
-	// one again instead of piling up orphan grant requests.
+	// Per-conversation dedupe: at most one pending grant request. A reserved
+	// entry means requestGrant is in flight; an id entry is a live approval.
 	a.mu.Lock()
-	existing := a.pending[convID]
+	pa := a.pending[convID]
+	if pa == nil {
+		a.pending[convID] = &pendingApproval{reserved: true}
+	}
 	a.mu.Unlock()
-	if existing != "" {
-		st, err := a.valet.grantRequestStatus(ctx, existing, 0)
+	pendingReason := map[string]any{"status": "pending_approval", "reason": "a purchase is already awaiting the owner's approval"}
+	if pa != nil {
+		if pa.reserved {
+			return pendingReason
+		}
+		st, err := a.valet.grantRequestStatus(ctx, pa.id, 0)
 		if err == nil && st["status"] == "pending" {
 			emit("approval_required", map[string]any{
-				"request_id": existing, "purpose": purpose, "amount_cents": total,
-				"merchant": merchant, "agent": "Valet Shopping Agent",
+				"request_id": pa.id, "purpose": pa.purpose, "amount_cents": pa.total,
+				"merchant": pa.merchant, "expires_at": pa.expiresAt, "agent": "Valet Shopping Agent",
 			})
-			return map[string]any{"status": "pending_approval", "reason": "a purchase is already awaiting the owner's approval"}
+			return pendingReason
 		}
+		a.mu.Lock()
+		delete(a.pending, convID)
+		a.pending[convID] = &pendingApproval{reserved: true}
+		a.mu.Unlock()
+	}
+	clearPending := func() {
 		a.mu.Lock()
 		delete(a.pending, convID)
 		a.mu.Unlock()
 	}
 	out, err := a.valet.requestGrant(ctx, "card://"+a.cfg.CardLabel, purpose, 600, 1, pol)
 	if err != nil {
+		clearPending()
 		return map[string]any{"status": "error", "reason": "grant request failed"}
 	}
 	var grantToken string
@@ -184,13 +198,10 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 		rid, _ := out["request_id"].(string)
 		exp, _ := out["expires_at"].(string)
 		a.mu.Lock()
-		a.pending[convID] = rid
-		a.mu.Unlock()
-		clearPending := func() {
-			a.mu.Lock()
-			delete(a.pending, convID)
-			a.mu.Unlock()
+		a.pending[convID] = &pendingApproval{
+			id: rid, purpose: purpose, total: int(total), merchant: merchant, expiresAt: exp,
 		}
+		a.mu.Unlock()
 		emit("approval_required", map[string]any{
 			"request_id": rid, "purpose": purpose, "amount_cents": total,
 			"merchant": merchant, "expires_at": exp, "agent": "Valet Shopping Agent",
@@ -203,7 +214,11 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 			}
 			st, err := a.valet.grantRequestStatus(ctx, rid, 60)
 			if err != nil {
-				clearPending()
+				if ctx.Err() == nil {
+					// Genuine poll failure — clear. On client disconnect the
+					// approval is still live; the next buy should reuse it.
+					clearPending()
+				}
 				return map[string]any{"status": "error", "reason": "approval poll failed"}
 			}
 			switch st["status"] {
@@ -220,6 +235,7 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 		}
 		clearPending()
 	} else {
+		clearPending()
 		grantToken, _ = out["token"].(string)
 	}
 	if grantToken == "" {

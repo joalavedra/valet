@@ -39,7 +39,18 @@ type app struct {
 	mu      sync.Mutex
 	orders  []order
 	convs   map[string][]geminiContent
-	pending map[string]string // conversation_id -> pending approval request id
+	pending map[string]*pendingApproval // conversation_id -> in-flight/pending approval
+}
+
+// pendingApproval tracks a conversation's grant request so concurrent buys
+// can't mint duplicates. reserved=true means requestGrant is still in flight.
+type pendingApproval struct {
+	id        string
+	purpose   string
+	total     int
+	merchant  string
+	expiresAt string
+	reserved  bool
 }
 
 func main() {
@@ -66,7 +77,7 @@ func main() {
 		store:   newDemoStore(),
 		valet:   newValetClient(cfg.ValetURL, cfg.AgentToken, cfg.OwnerToken),
 		convs:   map[string][]geminiContent{},
-		pending: map[string]string{},
+		pending: map[string]*pendingApproval{},
 	}
 	a.gemini = newGeminiClient(cfg.GeminiKey, cfg.GeminiModel)
 	a.agent = newChatAgent(a)
