@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -105,6 +106,7 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 	s.mux.HandleFunc("GET /v1/owner/grants", s.ownerAuth(s.ownerGrants))
 	s.mux.HandleFunc("POST /v1/owner/grants/{id}/revoke", s.ownerAuth(s.ownerRevoke))
 	s.mux.HandleFunc("GET /v1/owner/audit", s.ownerAuth(s.listAudit))
+	s.mux.HandleFunc("POST /v1/owner/captures", s.ownerAuth(s.ownerCaptures))
 	s.mux.HandleFunc("GET /capture/{token}", s.capturePage)
 	s.mux.HandleFunc("POST /capture/{token}/complete", s.captureComplete)
 	s.mux.HandleFunc("GET /wallet", s.walletPage)
@@ -234,6 +236,7 @@ func (s *Server) capturePage(w http.ResponseWriter, r *http.Request) {
 		"VaultID":        cfg.Fields["vault_id"],
 		"Env":            cfg.Fields["environment"],
 		"CollectVersion": cfg.Fields["collect_version"],
+		"ReturnURL":      captureReturnURL(c.Metadata),
 	}
 	if data["CollectVersion"] == "" {
 		data["CollectVersion"] = "3.4.0"
@@ -444,6 +447,23 @@ func approvalID() (string, error) {
 func approveURL(id string) string {
 	base := strings.TrimRight(os.Getenv("VALET_PUBLIC_URL"), "/")
 	return base + "/approve/" + id
+}
+
+// PublicBase returns the externally reachable base URL of this server:
+// VALET_PUBLIC_URL, else http:// + VALET_LISTEN (default :14400, a bare
+// port becoming localhost:port).
+func PublicBase() string {
+	if base := os.Getenv("VALET_PUBLIC_URL"); base != "" {
+		return strings.TrimRight(base, "/")
+	}
+	listen := os.Getenv("VALET_LISTEN")
+	if listen == "" {
+		listen = ":14400"
+	}
+	if len(listen) > 0 && listen[0] == ':' {
+		listen = "localhost" + listen
+	}
+	return "http://" + listen
 }
 
 // approvalRequired reports whether a grant request must wait for a human.
@@ -1324,6 +1344,79 @@ func (s *Server) ownerRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.chain.Append(e)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+// captureReturnURL extracts an http(s) return_url from capture metadata;
+// anything else is ignored (never redirected to).
+func captureReturnURL(metadata string) string {
+	var meta struct {
+		ReturnURL string `json:"return_url"`
+	}
+	if json.Unmarshal([]byte(metadata), &meta) != nil || meta.ReturnURL == "" {
+		return ""
+	}
+	u, err := url.Parse(meta.ReturnURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	return meta.ReturnURL
+}
+
+type ownerCaptureRequest struct {
+	Label      string `json:"label"`
+	TTLSeconds int64  `json:"ttl_seconds"`
+	ReturnURL  string `json:"return_url"`
+}
+
+// ownerCaptures mints a one-time card-capture link (same shape as
+// `valet card capture`) for embedding into approval/phone flows.
+func (s *Server) ownerCaptures(w http.ResponseWriter, r *http.Request) {
+	var req ownerCaptureRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
+		return
+	}
+	if req.Label == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "label required"})
+		return
+	}
+	ttl := time.Duration(req.TTLSeconds) * time.Second
+	if req.TTLSeconds == 0 {
+		ttl = 15 * time.Minute
+	}
+	if ttl <= 0 || ttl > 24*time.Hour {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad ttl_seconds"})
+		return
+	}
+	if req.ReturnURL != "" {
+		u, err := url.Parse(req.ReturnURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "return_url must be http(s)"})
+			return
+		}
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "token failed"})
+		return
+	}
+	token := base64.RawURLEncoding.EncodeToString(b)
+	expires := time.Now().UTC().Add(ttl)
+	metaMap := map[string]string{"provider": "vgs"}
+	if req.ReturnURL != "" {
+		metaMap["return_url"] = req.ReturnURL
+	}
+	meta, _ := json.Marshal(metaMap)
+	if err := s.st.CreateCapture(&store.Capture{
+		Token: token, Label: req.Label,
+		Metadata: string(meta), ExpiresAt: expires,
+	}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store failed"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"token": token, "url": PublicBase() + "/capture/" + token, "expires_at": expires,
+	})
 }
 
 //go:embed wallet.html

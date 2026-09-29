@@ -1405,3 +1405,44 @@ func TestOwnerGrantsEffectiveMaxUsesMin(t *testing.T) {
 		t.Fatalf("min(column=5,policy=1)=1 with uses=1 should be inactive: %v", list)
 	}
 }
+
+func TestOwnerCaptures(t *testing.T) {
+	srv, st, _, _, own := approvalServer(t, "card")
+	// No auth → 401.
+	code, _ := doJSON(t, srv, "POST", "/v1/owner/captures", "", map[string]any{"label": "personal"})
+	if code != 401 {
+		t.Fatalf("unauth: want 401, got %d", code)
+	}
+	code, out := doJSON(t, srv, "POST", "/v1/owner/captures", own,
+		map[string]any{"label": "personal", "ttl_seconds": 600, "return_url": "https://demo.example/?saved=1"})
+	if code != 201 {
+		t.Fatalf("want 201, got %d %v", code, out)
+	}
+	tok, _ := out["token"].(string)
+	url, _ := out["url"].(string)
+	if tok == "" || !strings.Contains(url, tok) || !strings.HasSuffix(url, "/capture/"+tok) {
+		t.Fatalf("bad response: %v", out)
+	}
+	c, err := st.GetCapture(tok)
+	if err != nil || c.Label != "personal" {
+		t.Fatalf("capture not stored: %v %v", c, err)
+	}
+	if !strings.Contains(c.Metadata, "return_url") {
+		t.Fatalf("return_url not in metadata: %s", c.Metadata)
+	}
+	// Bad ttl → 400.
+	code, _ = doJSON(t, srv, "POST", "/v1/owner/captures", own, map[string]any{"label": "x", "ttl_seconds": -5})
+	if code != 400 {
+		t.Fatalf("negative ttl: want 400, got %d", code)
+	}
+	// Non-http(s) return_url → 400.
+	code, _ = doJSON(t, srv, "POST", "/v1/owner/captures", own, map[string]any{"label": "x", "return_url": "javascript:alert(1)"})
+	if code != 400 {
+		t.Fatalf("js return_url: want 400, got %d", code)
+	}
+	// Missing label → 400.
+	code, _ = doJSON(t, srv, "POST", "/v1/owner/captures", own, map[string]any{})
+	if code != 400 {
+		t.Fatalf("no label: want 400, got %d", code)
+	}
+}
