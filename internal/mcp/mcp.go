@@ -52,6 +52,12 @@ func (b *HTTPBackend) redact(s string) string {
 }
 
 func (b *HTTPBackend) call(ctx context.Context, method, path string, body any, out any) error {
+	return b.callWith(ctx, method, path, body, out, 0)
+}
+
+// callWith is call with a per-request client timeout; 0 uses the default
+// client (and any test-injected b.Do).
+func (b *HTTPBackend) callWith(ctx context.Context, method, path string, body any, out any, timeout time.Duration) error {
 	var rdr io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -70,7 +76,13 @@ func (b *HTTPBackend) call(ctx context.Context, method, path string, body any, o
 	if b.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+b.Token)
 	}
-	resp, err := b.client().Do(req)
+	cl := b.client()
+	if timeout > 0 && b.Do == nil {
+		cp := *cl
+		cp.Timeout = timeout
+		cl = &cp
+	}
+	resp, err := cl.Do(req)
 	if err != nil {
 		return err
 	}
@@ -132,7 +144,11 @@ func (b *HTTPBackend) RequestGrant(ctx context.Context, handle, policyJSON, ttl,
 	}
 	waited, err := b.WaitGrant(ctx, requestID, wait)
 	if err != nil {
-		return nil, err
+		// The request itself is alive server-side — hand the id back so the
+		// caller can retry wait_grant instead of losing track of it.
+		out["hint"] = "waiting for human approval; call wait_grant with request_id"
+		out["wait_error"] = b.redact(err.Error())
+		return out, nil
 	}
 	if m, ok := waited.(map[string]any); ok && m["status"] == "pending" {
 		m["request_id"] = requestID
@@ -148,7 +164,8 @@ func (b *HTTPBackend) WaitGrant(ctx context.Context, requestID string, wait time
 	if wait > 0 {
 		path += fmt.Sprintf("?wait=%d", int64(wait/time.Second))
 	}
-	err := b.call(ctx, "GET", path, nil, &out)
+	// The poll can outlive the default 60s client timeout; allow wait+15s.
+	err := b.callWith(ctx, "GET", path, nil, &out, wait+15*time.Second)
 	return out, err
 }
 

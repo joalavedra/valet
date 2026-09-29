@@ -177,7 +177,7 @@
   function renderWallet() {
     show('wallet');
     Promise.all([api('GET', '/v1/owner/approvals?status=pending'), api('GET', '/v1/owner/handles'), api('GET', '/v1/owner/grants'), api('GET', '/v1/owner/audit')]).then(function (res) {
-      var pend = res[0].approvals || [], handles = res[1].handles || [], grants = (res[2].grants || []).filter(function (g) { return g.active; }), audit = (res[3].audit || []).slice(0, 15);
+      var pend = res[0].approvals || [], handles = res[1].handles || [], grants = (res[2].grants || []).filter(function (g) { return g.active; }), audit = (res[3].audit || []).slice(-15).reverse();
       var p = $('pending');
       p.innerHTML = pend.length ? pend.map(function (a) { return approvalCard(a); }).join('') : '<div class="empty">Nothing waiting for you.</div>';
       bindDecisions(p, function () { renderWallet(); });

@@ -313,3 +313,33 @@ func TestWaitGrant(t *testing.T) {
 		t.Fatal(err, out)
 	}
 }
+
+func TestRequestGrantWaitErrorKeepsRequestID(t *testing.T) {
+	var calls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(202)
+		json.NewEncoder(w).Encode(map[string]any{"status": "pending_approval", "request_id": "req9"})
+	}))
+	defer ts.Close()
+	b := &HTTPBackend{Base: ts.URL, Token: testToken, Do: &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 { // first call (POST) goes to the real server
+				return http.DefaultTransport.RoundTrip(r)
+			}
+			return nil, fmt.Errorf("simulated transport failure")
+		}),
+	}}
+	out, err := b.RequestGrant(context.Background(), "card://amex", "", "", "", 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	if m["request_id"] != "req9" || !strings.Contains(m["hint"].(string), "wait_grant") || m["wait_error"] == "" {
+		t.Fatalf("bad out %v", m)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

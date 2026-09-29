@@ -1262,3 +1262,72 @@ func TestConcurrentPollersAllWake(t *testing.T) {
 		}
 	}
 }
+
+func TestWaiterChannelsDoNotLeak(t *testing.T) {
+	srv, st, dek, tok, own := approvalServer(t, "card")
+	h := addCard(t, st, srv, dek, "amex")
+	_, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": h})
+	rid := out["request_id"].(string)
+	// wait=0 polls never register.
+	for i := 0; i < 3; i++ {
+		doJSON(t, srv, "GET", "/v1/grants/requests/"+rid, tok, nil)
+	}
+	// One completed wait>0 poll (woken by approve).
+	done := make(chan struct{})
+	go func() {
+		doJSON(t, srv, "GET", "/v1/grants/requests/"+rid+"?wait=10", tok, nil)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, nil)
+	<-done
+	if len(srv.waiters) != 0 {
+		t.Fatalf("waiters leaked: %v", srv.waiters)
+	}
+}
+
+func TestExpireIfStaleReflectsConcurrentDecision(t *testing.T) {
+	srv, st, dek, tok, own := approvalServer(t, "card")
+	h := addCard(t, st, srv, dek, "amex")
+	_, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": h})
+	rid := out["request_id"].(string)
+	doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, nil)
+	// A stale in-memory copy: still says pending and long past expiry.
+	ap, err := st.GetApproval(rid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := *ap
+	stale.Status = "pending"
+	past := time.Now().Add(-time.Hour)
+	stale.ExpiresAt = past
+	srv.expireIfStale(&stale)
+	if stale.Status != "approved" || stale.GrantID == "" {
+		t.Fatalf("stale copy should reflect approved, got %+v", stale)
+	}
+}
+
+func TestOwnerGrantsEffectiveMaxUses(t *testing.T) {
+	srv, st, dek, _, own := approvalServer(t, "none")
+	pt, _ := json.Marshal(map[string]string{"username": "u"})
+	ct, _ := crypto.Encrypt(dek, pt)
+	if err := st.AddCredential(&store.Credential{Handle: "cred://github.com/joan", Type: "login", Site: "github.com", Label: "joan", Metadata: "{}", Ciphertext: ct}); err != nil {
+		t.Fatal(err)
+	}
+	// Grant with max_uses in the policy (not the column).
+	_, g, err := srv.issuer.Issue(1, "cred://github.com/joan", `{"max_uses":1}`, time.Hour, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.IncrementGrantUses(g.ID); err != nil {
+		t.Fatal(err)
+	}
+	code, out := doJSON(t, srv, "GET", "/v1/owner/grants", own, nil)
+	if code != 200 {
+		t.Fatalf("owner grants: %d", code)
+	}
+	list := out["grants"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["active"] != false {
+		t.Fatalf("policy-exhausted grant should be inactive: %v", list)
+	}
+}
