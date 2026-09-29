@@ -53,7 +53,14 @@ type Server struct {
 	approvalNotify string
 	ownerToken     string
 	waitersMu      sync.Mutex
-	waiters        map[string]chan struct{}
+	waiters        map[string]*waiter
+}
+
+// waiter is a shared notification channel for polls on the same request id;
+// refs counts registered pollers so a canceled one can't strand the rest.
+type waiter struct {
+	ch   chan struct{}
+	refs int
 }
 
 // New builds the API mux.
@@ -81,7 +88,7 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 		approvalMode: mode, approvalTTL: approvalTTL,
 		approvalNotify: os.Getenv("VALET_APPROVAL_WEBHOOK"),
 		ownerToken:     os.Getenv("VALET_OWNER_TOKEN"),
-		waiters:        map[string]chan struct{}{},
+		waiters:        map[string]*waiter{},
 	}
 	s.mux.HandleFunc("GET /healthz", s.healthz)
 	s.mux.HandleFunc("GET /v1/handles", s.agentAuth(s.handles))
@@ -458,22 +465,40 @@ func (s *Server) approvalRequired(credType string, p *policy.Policy) bool {
 func (s *Server) signalWaiters(id string) {
 	s.waitersMu.Lock()
 	defer s.waitersMu.Unlock()
-	if ch, ok := s.waiters[id]; ok {
+	if w, ok := s.waiters[id]; ok {
 		delete(s.waiters, id)
-		close(ch)
+		close(w.ch)
 	}
 }
 
-// waiterChan returns (or creates) the notification channel for id.
+// waiterChan registers a poller on id's shared channel (refcounted),
+// creating it when absent.
 func (s *Server) waiterChan(id string) chan struct{} {
 	s.waitersMu.Lock()
 	defer s.waitersMu.Unlock()
-	ch, ok := s.waiters[id]
+	w, ok := s.waiters[id]
 	if !ok {
-		ch = make(chan struct{})
-		s.waiters[id] = ch
+		w = &waiter{ch: make(chan struct{})}
+		s.waiters[id] = w
 	}
-	return ch
+	w.refs++
+	return w.ch
+}
+
+// dropWaiter releases one poll's reference; the entry is removed only when
+// no pollers remain on this channel, so finished polls can't strand
+// concurrent ones sharing it.
+func (s *Server) dropWaiter(id string, ch chan struct{}) {
+	s.waitersMu.Lock()
+	defer s.waitersMu.Unlock()
+	w, ok := s.waiters[id]
+	if !ok || w.ch != ch {
+		return
+	}
+	w.refs--
+	if w.refs <= 0 {
+		delete(s.waiters, id)
+	}
 }
 
 // notifyWebhook best-effort POSTs the pending request to VALET_APPROVAL_WEBHOOK.
@@ -1010,7 +1035,7 @@ func evalReason(reason string) string {
 }
 
 func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
-	entries, err := s.st.ListAudit(500)
+	entries, err := s.st.ListAuditRecent(500)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1020,10 +1045,21 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 
 // expireIfStale lazily marks a pending approval past its TTL as expired.
 func (s *Server) expireIfStale(ap *store.Approval) {
-	if ap.Status == "pending" && time.Now().After(ap.ExpiresAt) {
-		if err := s.st.DecideApproval(ap.ID, "expired", "", nil); err == nil || errors.Is(err, store.ErrNotFound) {
-			ap.Status = "expired"
-			s.signalWaiters(ap.ID)
+	if ap.Status != "pending" || !time.Now().After(ap.ExpiresAt) {
+		return
+	}
+	err := s.st.DecideApproval(ap.ID, "expired", "", nil)
+	if err == nil {
+		ap.Status = "expired"
+		s.signalWaiters(ap.ID)
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		// Someone decided it concurrently — reflect the real outcome.
+		if fresh, ferr := s.st.GetApproval(ap.ID); ferr == nil {
+			ap.Status = fresh.Status
+			ap.GrantID = fresh.GrantID
+			ap.TokenCT = fresh.TokenCT
 		}
 	}
 }
@@ -1047,9 +1083,19 @@ func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *s
 	for {
 		// Register the waiter before re-reading status so a decision that
 		// lands between the read and the select still wakes this poll.
-		ch := s.waiterChan(ap.ID)
+		// wait=0 polls never block, so they skip registration entirely.
+		var ch chan struct{}
+		if waitSec > 0 {
+			ch = s.waiterChan(ap.ID)
+		}
+		release := func() {
+			if ch != nil {
+				s.dropWaiter(id, ch)
+			}
+		}
 		ap, err = s.st.GetApproval(id)
 		if err != nil {
+			release()
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "request not found"})
 			return
 		}
@@ -1068,10 +1114,12 @@ func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *s
 					resp["expires_at"] = g.ExpiresAt
 				}
 			}
+			release()
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 		if waitSec == 0 || !time.Now().Before(deadline) {
+			release()
 			writeJSON(w, http.StatusOK, map[string]any{"status": "pending", "request_id": ap.ID})
 			return
 		}
@@ -1081,9 +1129,11 @@ func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *s
 		case <-timer.C:
 		case <-r.Context().Done():
 			timer.Stop()
+			release()
 			return
 		}
 		timer.Stop()
+		release()
 	}
 }
 
@@ -1247,7 +1297,13 @@ func (s *Server) ownerGrants(w http.ResponseWriter, r *http.Request) {
 		if c, err := s.st.GetCredential(g.Handle); err == nil && c.Label != "" {
 			v.Label = c.Label
 		}
-		v.Active = v.RevokedAt == nil && time.Now().Before(g.ExpiresAt) && (g.MaxUses == 0 || g.Uses < g.MaxUses)
+		var p policy.Policy
+		json.Unmarshal([]byte(g.Policy), &p)
+		effectiveMax := g.MaxUses
+		if effectiveMax == 0 || (p.MaxUses > 0 && p.MaxUses < effectiveMax) {
+			effectiveMax = p.MaxUses
+		}
+		v.Active = v.RevokedAt == nil && time.Now().Before(g.ExpiresAt) && (effectiveMax == 0 || g.Uses < effectiveMax)
 		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"grants": out})
