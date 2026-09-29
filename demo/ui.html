@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d10">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<title>Valet Shop</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: -apple-system, 'Segoe UI', system-ui, sans-serif; background: #0b0d10; color: #e8eaed;
+         height: 100dvh; display: flex; flex-direction: column; max-width: 520px; margin: 0 auto; }
+  header { padding: 14px 16px 8px; font-weight: 600; font-size: 15px; display:flex; align-items:center; gap:8px; }
+  header .dot { width:8px; height:8px; border-radius:50%; background:#4ade80; }
+  #views { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .view { flex:1; overflow-y:auto; padding: 12px 16px 20px; display:none; }
+  .view.active { display:block; }
+  #chat-view { display:none; flex-direction:column; }
+  #chat-view.active { display:flex; }
+  #messages { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding-bottom:12px; }
+  .bubble { padding: 10px 14px; border-radius: 16px; max-width: 85%; font-size: 15px; line-height: 1.35; white-space: pre-wrap; }
+  .bubble.user { background: #2563eb; align-self: flex-end; border-bottom-right-radius: 4px; }
+  .bubble.bot { background: #1f2430; align-self: flex-start; border-bottom-left-radius: 4px; }
+  .sys { align-self: center; font-size: 12px; color: #8b93a5; padding: 4px 10px; }
+  .receipt { background: #14231a; border: 1px solid #1f4d33; align-self: stretch; padding: 12px 14px; border-radius: 14px; font-size: 14px; }
+  .receipt .amt { font-size: 20px; font-weight: 700; }
+  #composer { display:flex; gap:8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+  #composer input { flex:1; background:#161a22; border:1px solid #2a3140; color:#e8eaed; border-radius: 20px; padding: 12px 16px; font-size: 16px; }
+  #composer button { background:#2563eb; border:none; color:#fff; border-radius:20px; padding:0 18px; font-size:15px; }
+  .chips { display:flex; gap:8px; padding: 0 12px 8px; flex-wrap: wrap; }
+  .chip { background:#161a22; border:1px solid #2a3140; border-radius:16px; padding:6px 12px; font-size:13px; color:#c7cdd9; cursor:pointer; }
+  nav { display:flex; border-top:1px solid #1c212c; padding-bottom: env(safe-area-inset-bottom); }
+  nav button { flex:1; background:none; border:none; color:#8b93a5; font-size:13px; padding:12px; }
+  nav button.on { color:#fff; }
+  .card { background:#161a22; border:1px solid #2a3140; border-radius:14px; padding:14px; margin-bottom:12px; }
+  .card .t { font-size:13px; color:#8b93a5; text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px; }
+  .big { font-size:18px; font-weight:600; }
+  .btn { display:block; width:100%; padding:13px; border:none; border-radius:12px; font-size:15px; font-weight:600; margin-top:8px; cursor:pointer; }
+  .btn.primary { background:#2563eb; color:#fff; }
+  .btn.deny { background:#2a3140; color:#e8eaed; }
+  .btn.danger { background:#7f1d1d; color:#fecaca; padding:8px; font-size:13px; width:auto; display:inline-block; }
+  #sheet { position:fixed; inset:auto 0 0 0; background:#12161e; border-radius:20px 20px 0 0; padding:22px 20px calc(20px + env(safe-area-inset-bottom));
+           transform:translateY(110%); transition:transform .25s ease; max-width:520px; margin:0 auto; left:0; right:0; box-shadow:0 -8px 40px rgba(0,0,0,.6); z-index:10; }
+  #sheet.open { transform:translateY(0); }
+  #sheet .amt { font-size:34px; font-weight:700; margin:8px 0; }
+  #sheet .row { display:flex; justify-content:space-between; font-size:14px; color:#aeb6c6; padding:5px 0; }
+  #toast { position:fixed; top:14px; left:50%; transform:translateX(-50%); background:#1f2430; padding:10px 18px; border-radius:20px; font-size:14px; display:none; z-index:20; }
+  .muted { color:#8b93a5; font-size:12px; }
+  .grant { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid #222936; font-size:14px; }
+  .mono { font-family:ui-monospace,monospace; font-size:12px; }
+  #loader { text-align:center; padding:24px; color:#8b93a5; }
+</style>
+</head>
+<body>
+<header><span class="dot"></span> Valet Shop <span class="muted" id="sub"></span></header>
+<div id="views">
+  <div id="chat-view" class="view active">
+    <div id="messages"></div>
+    <div class="chips">
+      <button class="chip" onclick="ask('What can I buy?')">What can I buy?</button>
+      <button class="chip" onclick="ask('Buy the coffee beans')">Buy the coffee beans</button>
+    </div>
+    <div id="composer">
+      <input id="msg" placeholder="Message the shopping agent" autocomplete="off">
+      <button id="send">Send</button>
+    </div>
+  </div>
+  <div id="wallet-view" class="view">
+    <div id="wallet-body"><div id="loader">Loading…</div></div>
+  </div>
+</div>
+<div id="sheet">
+  <div class="muted">Payment approval</div>
+  <div class="amt" id="sh-amt"></div>
+  <div class="row"><span>Agent</span><span>Valet Shopping Agent</span></div>
+  <div class="row"><span>Merchant</span><span id="sh-merchant"></span></div>
+  <div class="row"><span>Purpose</span><span id="sh-purpose" style="text-align:right;max-width:70%"></span></div>
+  <div class="row"><span>Expires</span><span id="sh-exp"></span></div>
+  <button class="btn primary" id="sh-allow">Allow</button>
+  <button class="btn deny" id="sh-deny">Deny</button>
+</div>
+<div id="toast"></div>
+<nav>
+  <button id="tab-chat" class="on">Chat</button>
+  <button id="tab-wallet">Wallet</button>
+</nav>
+<script>
+const $ = id => document.getElementById(id);
+const conv = 'conv_' + Math.random().toString(36).slice(2, 10);
+let sheetReq = null;
+
+function money(c) { return '$' + (c / 100).toFixed(2); }
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function toast(t) { const el = $('toast'); el.textContent = t; el.style.display = 'block'; setTimeout(() => el.style.display = 'none', 3000); }
+
+function bubble(cls, text) {
+  const d = document.createElement('div');
+  d.className = cls; d.innerHTML = text;
+  $('messages').appendChild(d); $('messages').scrollTop = $('messages').scrollHeight;
+}
+function receipt(o) {
+  bubble('receipt', `<div class="amt">${money(o.total_cents)}</div><div>${esc(o.order_id)} · card ****${esc(o.last4)}</div><div class="muted">Paid via Valet</div>`);
+}
+
+function ask(text) { $('msg').value = text; send(); }
+
+async function send() {
+  const text = $('msg').value.trim(); if (!text) return;
+  $('msg').value = '';
+  bubble('bubble user', esc(text));
+  const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({conversation_id: conv, message: text})});
+  const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+  while (true) {
+    const {done, value} = await reader.read(); if (done) break;
+    buf += dec.decode(value, {stream:true});
+    let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+      const ev = /event: (\S+)/.exec(chunk), dt = /data: (.*)/s.exec(chunk);
+      if (!ev || !dt) continue;
+      const d = JSON.parse(dt[1]);
+      if (ev[1] === 'text') bubble('bubble bot', esc(d.content));
+      if (ev[1] === 'tool') bubble('sys', `→ ${esc(d.name)} ${esc(d.args || '')}`);
+      if (ev[1] === 'approval_required') openSheet(d);
+      if (ev[1] === 'receipt') receipt(d);
+      if (ev[1] === 'error') bubble('sys', 'Error: ' + esc(d.error));
+    }
+  }
+}
+$('send').onclick = send;
+$('msg').addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+
+function openSheet(d) {
+  sheetReq = d.request_id;
+  $('sh-amt').textContent = money(d.amount_cents);
+  $('sh-merchant').textContent = d.merchant;
+  $('sh-purpose').textContent = d.purpose;
+  $('sh-exp').textContent = d.expires_at ? new Date(d.expires_at).toLocaleTimeString() : '';
+  $('sheet').classList.add('open');
+}
+async function decide(action) {
+  await fetch('/api/approvals/' + sheetReq + '/' + action, {method:'POST'});
+  $('sheet').classList.remove('open');
+  bubble('sys', action === 'approve' ? 'You approved the purchase' : 'You denied the purchase');
+}
+$('sh-allow').onclick = () => decide('approve');
+$('sh-deny').onclick = () => decide('deny');
+
+async function loadWallet() {
+  const s = await (await fetch('/api/state')).json();
+  const b = $('wallet-body');
+  let h = '';
+  if (!s.card_saved) {
+    h += `<div class="card"><div class="t">No card yet</div><div class="big">Add a card to your Valet</div>
+      <div class="muted" style="margin:6px 0">Card data goes to the vault directly — Valet never sees it.</div>
+      <button class="btn primary" id="addcard">Add card</button></div>`;
+  } else {
+    h += `<div class="card"><div class="t">Saved card</div><div class="big">💳 **** ${esc(s.card_last4 || '')}</div>
+      <div class="muted">${esc(s.card_holder || '')} ${esc(s.card_exp || '')}</div></div>`;
+  }
+  h += '<div class="card"><div class="t">Active grants</div>';
+  const grants = (s.grants || []).filter(g => g.active);
+  h += grants.length ? grants.map(g => `<div class="grant"><span>${esc(g.handle)}<div class="muted">${esc(g.id)}</div></span>
+    <button class="btn danger" onclick="revoke('${esc(g.id)}')">Revoke</button></div>`).join('') : '<div class="muted">None</div>';
+  h += '</div><div class="card"><div class="t">Recent activity</div>';
+  h += (s.audit && s.audit.length) ? s.audit.map(e => `<div class="grant"><span class="mono">${esc(e.decision)}</span><span class="muted">${esc(e.handle || e.target || '')}</span></div>`).join('') : '<div class="muted">None</div>';
+  h += '</div><div class="card"><div class="t">Orders</div>';
+  h += (s.orders && s.orders.length) ? s.orders.map(o => `<div class="grant"><span>${money(o.total_cents)} ****${esc(o.last4)}</span><span class="muted">${esc(o.order_id)}</span></div>`).join('') : '<div class="muted">None</div>';
+  b.innerHTML = h + '</div>';
+  const btn = $('addcard');
+  if (btn) btn.onclick = async () => {
+    const r = await (await fetch('/api/card/capture', {method:'POST'})).json();
+    window.location = r.url;
+  };
+}
+async function revoke(id) { await fetch('/api/grants/' + id + '/revoke', {method:'POST'}); loadWallet(); toast('Grant revoked'); }
+
+$('tab-chat').onclick = () => { $('tab-chat').classList.add('on'); $('tab-wallet').classList.remove('on'); $('chat-view').classList.add('active'); $('wallet-view').classList.remove('active'); };
+$('tab-wallet').onclick = () => { $('tab-wallet').classList.add('on'); $('tab-chat').classList.remove('on'); $('wallet-view').classList.add('active'); $('chat-view').classList.remove('active'); loadWallet(); };
+
+if (new URLSearchParams(location.search).get('saved')) toast('Card saved');
+loadWallet().then(() => { fetch('/api/state').then(r=>r.json()).then(s => { if (!s.card_saved) $('sub').textContent = '— no card yet'; }); });
+bubble('sys', 'Chat with the shopping agent — payments need your approval.');
+</script>
+</body>
+</html>
