@@ -107,7 +107,11 @@ func (a *app) chatHandler(w http.ResponseWriter, r *http.Request) {
 func summarizeArgs(name string, args map[string]any) string {
 	switch name {
 	case "checkout":
-		return fmt.Sprintf("product=%v qty=%v", args["product_id"], args["qty"])
+		qty := any(1)
+		if args["qty"] != nil {
+			qty = args["qty"]
+		}
+		return fmt.Sprintf("product=%v qty=%v", args["product_id"], qty)
 	default:
 		return ""
 	}

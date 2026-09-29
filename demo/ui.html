@@ -158,14 +158,14 @@ async function loadWallet() {
       <button class="btn primary" id="addcard">Add card</button></div>`;
   } else {
     h += `<div class="card"><div class="t">Saved card</div><div class="big">💳 **** ${esc(s.card_last4 || '')}</div>
-      <div class="muted">${esc(s.card_holder || '')} ${esc(s.card_exp || '')}</div></div>`;
+      <div class="muted">Saved via VGS${s.card_bin ? ' · ' + esc(s.card_bin) + '…' : ''}</div></div>`;
   }
   h += '<div class="card"><div class="t">Active grants</div>';
   const grants = (s.grants || []).filter(g => g.active);
   h += grants.length ? grants.map(g => `<div class="grant"><span>${esc(g.handle)}<div class="muted">${esc(g.id)}</div></span>
     <button class="btn danger" onclick="revoke('${esc(g.id)}')">Revoke</button></div>`).join('') : '<div class="muted">None</div>';
   h += '</div><div class="card"><div class="t">Recent activity</div>';
-  h += (s.audit && s.audit.length) ? s.audit.map(e => `<div class="grant"><span class="mono">${esc(e.decision)}</span><span class="muted">${esc(e.handle || e.target || '')}</span></div>`).join('') : '<div class="muted">None</div>';
+  h += (s.audit && s.audit.length) ? s.audit.map(e => `<div class="grant"><span class="mono">${esc(e.Edge)} ${esc(e.Decision)}</span><span class="muted">${esc(e.Handle || e.Target || '')}</span></div>`).join('') : '<div class="muted">None</div>';
   h += '</div><div class="card"><div class="t">Orders</div>';
   h += (s.orders && s.orders.length) ? s.orders.map(o => `<div class="grant"><span>${money(o.total_cents)} ****${esc(o.last4)}</span><span class="muted">${esc(o.order_id)}</span></div>`).join('') : '<div class="muted">None</div>';
   b.innerHTML = h + '</div>';

@@ -14,18 +14,16 @@ func (a *app) stateHandler(w http.ResponseWriter, r *http.Request) {
 				if m["handle"] == "card://"+a.cfg.CardLabel {
 					out["card_saved"] = true
 					var meta struct {
-						Last4    string `json:"last4"`
-						ExpMonth string `json:"exp_month"`
-						ExpYear  string `json:"exp_year"`
-						Holder   string `json:"holder"`
-						Provider string `json:"provider"`
+						Last4 string `json:"last4"`
+						Bin   string `json:"bin"`
 					}
 					if s, ok := m["metadata"].(string); ok {
 						json.Unmarshal([]byte(s), &meta)
 					}
 					out["card_last4"] = meta.Last4
-					out["card_exp"] = meta.ExpMonth + "/" + meta.ExpYear
-					out["card_holder"] = meta.Holder
+					if meta.Bin != "" {
+						out["card_bin"] = meta.Bin
+					}
 				}
 			}
 		}

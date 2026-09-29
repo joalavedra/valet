@@ -4,6 +4,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
 	"log"
@@ -100,16 +101,18 @@ func env(k, def string) string {
 	return def
 }
 
-// basicAuth gates everything except /store/* and /valet/* (VGS + phone reach
-// those without credentials).
+// basicAuth gates everything except /store/*, /valet/* and the web manifest
+// (VGS, the phone's capture page and Chrome's manifest fetch reach those
+// without credentials).
 func basicAuth(next http.Handler, password string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/store/") || strings.HasPrefix(r.URL.Path, "/valet/") {
+		if strings.HasPrefix(r.URL.Path, "/store/") || strings.HasPrefix(r.URL.Path, "/valet/") ||
+			r.URL.Path == "/manifest.webmanifest" {
 			next.ServeHTTP(w, r)
 			return
 		}
 		u, p, ok := r.BasicAuth()
-		if !ok || u != "demo" || p != password {
+		if !ok || u != "demo" || subtle.ConstantTimeCompare([]byte(p), []byte(password)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="valet-demo"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

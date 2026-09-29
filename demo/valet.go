@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -26,6 +27,10 @@ func newValetClient(base, agentToken, ownerToken string) *valetClient {
 }
 
 func (v *valetClient) call(ctx context.Context, token, method, path string, body, out any) error {
+	return v.callWith(ctx, v.http, token, method, path, body, out)
+}
+
+func (v *valetClient) callWith(ctx context.Context, cl *http.Client, token, method, path string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -44,7 +49,7 @@ func (v *valetClient) call(ctx context.Context, token, method, path string, body
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := v.http.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return err
 	}
@@ -78,12 +83,9 @@ func (v *valetClient) requestGrant(ctx context.Context, handle, purpose string, 
 func (v *valetClient) grantRequestStatus(ctx context.Context, id string, wait int) (map[string]any, error) {
 	var out map[string]any
 	path := fmt.Sprintf("/v1/grants/requests/%s?wait=%d", id, wait)
-	cl := *v.http
-	cl.Timeout = time.Duration(wait+15) * time.Second
-	orig := v.http
-	v.http = &cl
-	defer func() { v.http = orig }()
-	err := v.call(ctx, v.agentToken, "GET", path, nil, &out)
+	// Per-call client with a long-poll timeout; never mutate the shared client.
+	cl := &http.Client{Timeout: time.Duration(wait+15) * time.Second, Transport: v.http.Transport}
+	err := v.callWith(ctx, cl, v.agentToken, "GET", path, nil, &out)
 	return out, err
 }
 
@@ -119,14 +121,20 @@ func (v *valetClient) ownerAction(ctx context.Context, path string) (map[string]
 	return out, err
 }
 
-// valetProxy reverse-proxies /valet/* to the valet server so the phone can
-// load /valet/capture/<token> and Collect.js can post back to same-origin.
+// valetProxy reverse-proxies an allowlist of /valet/* paths to the valet
+// server — only /capture/<token> (page + Collect.js posts, same-origin)
+// and /healthz are exposed without auth; anything else is a 404.
 type valetProxy struct {
 	target string
 	client *http.Client
 }
 
 func (p *valetProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// r.URL.Path here is already stripped of the /valet prefix.
+	if r.URL.Path != "/healthz" && !strings.HasPrefix(r.URL.Path, "/capture/") {
+		http.NotFound(w, r)
+		return
+	}
 	u, _ := url.Parse(p.target)
 	rp := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
