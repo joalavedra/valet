@@ -1,1 +1,214 @@
-<!doctype html><title>valet wallet</title>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valet wallet</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#111; --muted:#667; --line:#e3e5ea; --ok:#0a7d3e; --bad:#b3261e; --accent:#111; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid var(--line); background:var(--card); }
+  header h1 { font-size:17px; margin:0; letter-spacing:.2px; }
+  header nav a { color:var(--muted); text-decoration:none; margin-left:16px; font-size:14px; }
+  main { max-width:760px; margin:28px auto; padding:0 16px; }
+  section { margin-bottom:32px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:10px; }
+  .row { display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
+  .v { font-weight:600; }
+  .muted { color:var(--muted); }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
+  .pill { display:inline-block; font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }
+  .pill.ok { color:var(--ok); border-color:#bfe3cf; background:#eef9f2; }
+  .pill.bad { color:var(--bad); border-color:#f0c4c0; background:#fdf1f0; }
+  button { font:inherit; border-radius:10px; padding:10px 16px; border:1px solid var(--line); background:var(--card); cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.danger { color:var(--bad); }
+  button[disabled] { opacity:.5; cursor:default; }
+  .actions { display:flex; gap:10px; margin-top:14px; }
+  .actions button { flex:1; }
+  dl { display:grid; grid-template-columns:110px 1fr; row-gap:8px; column-gap:12px; margin:14px 0 0; }
+  dt { color:var(--muted); font-size:13px; } dd { margin:0; font-weight:600; }
+  .approve { max-width:440px; margin:40px auto; }
+  .approve .card { padding:24px; }
+  .approve h3 { margin:0 0 4px; font-size:18px; }
+  .approve p.sub { margin:0 0 6px; color:var(--muted); }
+  .note { font-size:13px; color:var(--muted); margin-top:14px; }
+  .empty { color:var(--muted); font-size:14px; padding:6px 0; }
+  #login { max-width:420px; margin:60px auto; }
+  #login input { width:100%; font:inherit; padding:10px 12px; border:1px solid var(--line); border-radius:10px; margin:10px 0; }
+  #err { color:var(--bad); font-size:14px; min-height:20px; }
+  .big { font-size:28px; font-weight:700; }
+  .done { text-align:center; padding:24px 0; }
+  .done .big { color:var(--ok); }
+  .done.bad .big { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Valet</h1>
+  <nav>
+    <a href="/wallet">Wallet</a>
+    <a href="#" id="logout">Sign out</a>
+  </nav>
+</header>
+<main>
+  <div id="login" hidden>
+    <div class="card">
+      <h3 style="margin:0 0 4px">Owner sign-in</h3>
+      <p class="muted" style="margin:0">Paste the owner token (<span class="mono">VALET_OWNER_TOKEN</span>). It stays in this tab only.</p>
+      <input id="tok" type="password" placeholder="owner token" autocomplete="off">
+      <button class="primary" id="signin" style="width:100%">Continue</button>
+      <div id="err"></div>
+    </div>
+  </div>
+  <div id="approveView" hidden class="approve"></div>
+  <div id="walletView" hidden>
+    <section><h2>Pending approvals</h2><div id="pending"></div></section>
+    <section><h2>Saved cards &amp; credentials</h2><div id="handles"></div></section>
+    <section><h2>Active grants</h2><div id="grants"></div></section>
+    <section><h2>Recent activity</h2><div id="audit"></div></section>
+  </div>
+</main>
+<script>
+(function () {
+  var KEY = 'valet_owner_token';
+  var approveId = (location.pathname.match(/^\/approve\/([A-Za-z0-9_-]+)/) || [])[1] || null;
+  var $ = function (id) { return document.getElementById(id); };
+  function token() { return sessionStorage.getItem(KEY) || ''; }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function api(method, path, body) {
+    return fetch(path, { method: method, headers: { 'Authorization': 'Bearer ' + token(), 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (r.status === 401) { throw new Error('unauthorized'); } if (!r.ok) { throw new Error(j.error || ('HTTP ' + r.status)); } return j; }); });
+  }
+  function money(minor, cur) {
+    if (minor == null) return '—';
+    var n = (Number(minor) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return (cur ? cur.toUpperCase() + ' ' : '$') + n;
+  }
+  function when(ts) { if (!ts) return '—'; var d = new Date(ts); return isNaN(d) ? ts : d.toLocaleString(); }
+  function meta(h) { try { return JSON.parse(h.metadata || '{}'); } catch (e) { return {}; } }
+  function handleLabel(h) {
+    var m = meta(h);
+    if ((h.type || '').indexOf('card') === 0) return (m.brand ? m.brand + ' ' : 'Card ') + (m.last4 ? '•••• ' + m.last4 : (h.label || h.handle));
+    return (h.site ? h.site + ' · ' : '') + (h.label || h.handle);
+  }
+  function policySummary(p) {
+    p = p || {};
+    var out = [];
+    if (p.spend) {
+      if (p.spend.per_tx) out.push(['Limit', money(p.spend.per_tx, p.spend.currency)]);
+      if (p.spend.daily) out.push(['Daily', money(p.spend.daily, p.spend.currency)]);
+      if (p.spend.merchants && p.spend.merchants.length) out.push(['Merchant', p.spend.merchants.join(', ')]);
+    }
+    if (p.hosts && p.hosts.length) out.push(['Sites', p.hosts.join(', ')]);
+    if (p.max_uses) out.push(['Uses', String(p.max_uses)]);
+    return out;
+  }
+  function pill(text, cls) { return '<span class="pill ' + (cls || '') + '">' + esc(text) + '</span>'; }
+
+  function show(view) {
+    $('login').hidden = view !== 'login';
+    $('approveView').hidden = view !== 'approve';
+    $('walletView').hidden = view !== 'wallet';
+    $('logout').hidden = view === 'login';
+  }
+  function signOut() { sessionStorage.removeItem(KEY); $('tok').value = ''; show('login'); }
+  function fail(e) { if (e && e.message === 'unauthorized') { signOut(); $('err').textContent = 'Invalid owner token.'; } else { alert(e.message || e); } }
+
+  function approvalCard(a, opts) {
+    var pol = policySummary(a.policy);
+    var exp = a.ttl ? new Date(Date.now() + a.ttl * 1000) : null;
+    var h = '<div class="card" data-id="' + esc(a.id) + '">';
+    if (opts && opts.big) {
+      h += '<h3>' + esc(a.agent || 'An agent') + ' is requesting to use ' + (a.type === 'card' ? 'your card' : 'a credential') + '</h3>';
+      h += '<p class="sub">Approve it once, for this budget only.</p>';
+    } else {
+      h += '<div class="row"><span class="v">' + esc(a.agent || 'agent') + '</span>' + pill(a.status, a.status === 'pending' ? '' : (a.status === 'approved' ? 'ok' : 'bad')) + '</div>';
+    }
+    h += '<dl>';
+    if (a.purpose) h += '<dt>Purpose</dt><dd>' + esc(a.purpose) + '</dd>';
+    pol.forEach(function (kv) { h += '<dt>' + esc(kv[0]) + '</dt><dd>' + esc(kv[1]) + '</dd>'; });
+    h += '<dt>' + (a.type === 'card' ? 'Card' : 'Credential') + '</dt><dd>' + esc(handleLabel(a)) + '</dd>';
+    if (exp) h += '<dt>Expires</dt><dd>' + esc(exp.toLocaleString()) + '</dd>';
+    h += '</dl>';
+    if (a.status === 'pending') {
+      h += '<div class="actions"><button class="deny">Deny</button><button class="primary allow">Allow</button></div>';
+      h += '<div class="note">Your ' + (a.type === 'card' ? 'card number' : 'password') + ' is never shared with the agent. Request expires ' + esc(when(a.expires_at)) + '.</div>';
+    }
+    return h + '</div>';
+  }
+  function bindDecisions(root, after) {
+    root.querySelectorAll('.card[data-id]').forEach(function (el) {
+      var id = el.getAttribute('data-id');
+      var allow = el.querySelector('.allow'), deny = el.querySelector('.deny');
+      function go(action) {
+        [allow, deny].forEach(function (b) { if (b) b.disabled = true; });
+        api('POST', '/v1/owner/approvals/' + encodeURIComponent(id) + '/' + action).then(function (r) { after(id, r); }).catch(function (e) { fail(e); [allow, deny].forEach(function (b) { if (b) b.disabled = false; }); });
+      }
+      if (allow) allow.onclick = function () { go('approve'); };
+      if (deny) deny.onclick = function () { go('deny'); };
+    });
+  }
+
+  function decided(a, status) {
+    var ok = status === 'approved';
+    var pol = policySummary(a.policy);
+    var limit = pol.filter(function (kv) { return kv[0] === 'Limit'; })[0];
+    var h = '<div class="card"><div class="done ' + (ok ? '' : 'bad') + '"><div class="big">' + (ok ? 'Approved.' : (status === 'denied' ? 'Denied.' : 'Expired.')) + '</div>';
+    if (ok) h += '<p>' + esc(a.agent || 'The agent') + ' can ' + (limit ? 'spend up to ' + esc(limit[1]) : 'use ' + esc(handleLabel(a))) + (a.grant_expires_at ? ' until ' + esc(when(a.grant_expires_at)) : '') + '.</p>';
+    h += '<p class="muted">You can close this. ' + (ok ? 'Revoke it any time from your <a href="/wallet">wallet</a>.' : '') + '</p></div></div>';
+    return h;
+  }
+  function renderApprove() {
+    show('approve');
+    var root = $('approveView');
+    root.innerHTML = '<div class="card"><p class="muted">Loading…</p></div>';
+    api('GET', '/v1/owner/approvals').then(function (j) {
+      var a = (j.approvals || []).filter(function (x) { return x.id === approveId; })[0];
+      if (!a) { root.innerHTML = '<div class="card"><h3>Request not found</h3><p class="muted">It may have expired.</p></div>'; return; }
+      if (a.status !== 'pending') { root.innerHTML = decided(a, a.status); return; }
+      root.innerHTML = approvalCard(a, { big: true });
+      bindDecisions(root, function (id, r) { a.status = r.status; a.grant_expires_at = r.expires_at; root.innerHTML = decided(a, r.status); });
+    }).catch(fail);
+  }
+
+  function renderWallet() {
+    show('wallet');
+    Promise.all([api('GET', '/v1/owner/approvals?status=pending'), api('GET', '/v1/owner/handles'), api('GET', '/v1/owner/grants'), api('GET', '/v1/owner/audit')]).then(function (res) {
+      var pend = res[0].approvals || [], handles = res[1].handles || [], grants = (res[2].grants || []).filter(function (g) { return g.active; }), audit = (res[3].audit || []).slice(0, 15);
+      var p = $('pending');
+      p.innerHTML = pend.length ? pend.map(function (a) { return approvalCard(a); }).join('') : '<div class="empty">Nothing waiting for you.</div>';
+      bindDecisions(p, function () { renderWallet(); });
+      $('handles').innerHTML = handles.length ? handles.map(function (h) {
+        return '<div class="card"><div class="row"><span class="v">' + esc(handleLabel(h)) + '</span>' + pill(h.type) + '</div><div class="mono muted">' + esc(h.handle) + '</div></div>';
+      }).join('') : '<div class="empty">No cards yet. Add one with <span class="mono">valet card capture</span> and your agents can ask to use it.</div>';
+      $('grants').innerHTML = grants.length ? grants.map(function (g) {
+        var pol = policySummary(g.policy);
+        return '<div class="card" data-grant="' + esc(g.id) + '"><div class="row"><span class="v">' + esc(g.agent || 'agent') + ' → ' + esc(handleLabel(g)) + '</span><button class="danger revoke">Revoke</button></div>' +
+          '<div class="muted">' + pol.map(function (kv) { return esc(kv[0]) + ': ' + esc(kv[1]); }).join(' · ') + (pol.length ? ' · ' : '') + 'uses ' + esc(g.uses) + (g.max_uses ? '/' + esc(g.max_uses) : '') + ' · until ' + esc(when(g.expires_at)) + '</div></div>';
+      }).join('') : '<div class="empty">No active grants.</div>';
+      $('grants').querySelectorAll('.revoke').forEach(function (b) {
+        b.onclick = function () { var id = b.closest('[data-grant]').getAttribute('data-grant'); b.disabled = true; api('POST', '/v1/owner/grants/' + encodeURIComponent(id) + '/revoke').then(renderWallet).catch(function (e) { fail(e); b.disabled = false; }); };
+      });
+      $('audit').innerHTML = audit.length ? '<div class="card">' + audit.map(function (e) {
+        var d = e.Decision || '';
+        return '<div class="row"><span class="mono">' + esc(when(e.TS)) + '</span><span>' + esc(e.Edge + '/' + e.Target) + ' ' + pill(d, /allow|grant|ok|approved/.test(d) ? 'ok' : (/deny|revoked|denied/.test(d) ? 'bad' : '')) + '</span></div>';
+      }).join('') + '</div>' : '<div class="empty">No activity yet.</div>';
+    }).catch(fail);
+  }
+
+  function start() {
+    if (!token()) { show('login'); return; }
+    if (approveId) renderApprove(); else renderWallet();
+  }
+  $('signin').onclick = function () { var t = $('tok').value.trim(); if (!t) return; sessionStorage.setItem(KEY, t); $('err').textContent = ''; start(); };
+  $('tok').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('signin').click(); });
+  $('logout').onclick = function (e) { e.preventDefault(); signOut(); };
+  start();
+  if (!approveId) setInterval(function () { if (token() && !$('walletView').hidden) renderWallet(); }, 5000);
+})();
+</script>
+</body>
+</html>
