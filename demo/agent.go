@@ -179,7 +179,10 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 			return pendingReason
 		}
 		a.mu.Lock()
-		delete(a.pending, convID)
+		if a.pending[convID] != pa {
+			a.mu.Unlock()
+			return pendingReason
+		}
 		a.pending[convID] = &pendingApproval{reserved: true}
 		a.mu.Unlock()
 	}
