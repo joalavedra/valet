@@ -3,7 +3,10 @@
 package server
 
 import (
+	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +20,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/joalavedra/valet/internal/audit"
@@ -42,6 +46,14 @@ type Server struct {
 	cdpDefault string
 	cardProv   card.Provider
 	mux        *http.ServeMux
+
+	// approvalMode is "card" (default), "all", or "none".
+	approvalMode   string
+	approvalTTL    time.Duration
+	approvalNotify string
+	ownerToken     string
+	waitersMu      sync.Mutex
+	waiters        map[string]chan struct{}
 }
 
 // New builds the API mux.
@@ -53,16 +65,43 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 	for i := range allow {
 		allow[i] = strings.TrimSpace(allow[i])
 	}
-	s := &Server{st: st, issuer: issuer, chain: chain, filler: filler, dek: dek, egress: eg, cdpAllow: allow, mux: http.NewServeMux()}
+	mode := os.Getenv("VALET_REQUIRE_APPROVAL")
+	if mode == "" {
+		mode = "card"
+	}
+	approvalTTL := 10 * time.Minute
+	if v := os.Getenv("VALET_APPROVAL_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			approvalTTL = d
+		}
+	}
+	s := &Server{
+		st: st, issuer: issuer, chain: chain, filler: filler, dek: dek, egress: eg,
+		cdpAllow: allow, mux: http.NewServeMux(),
+		approvalMode: mode, approvalTTL: approvalTTL,
+		approvalNotify: os.Getenv("VALET_APPROVAL_WEBHOOK"),
+		ownerToken:     os.Getenv("VALET_OWNER_TOKEN"),
+		waiters:        map[string]chan struct{}{},
+	}
 	s.mux.HandleFunc("GET /healthz", s.healthz)
 	s.mux.HandleFunc("GET /v1/handles", s.agentAuth(s.handles))
 	s.mux.HandleFunc("POST /v1/grants", s.agentAuth(s.createGrant))
+	s.mux.HandleFunc("GET /v1/grants/requests/{id}", s.agentAuth(s.grantRequestStatus))
 	s.mux.HandleFunc("POST /v1/edge/browser/fill", s.agentAuth(s.browserFill))
 	s.mux.HandleFunc("POST /v1/edge/card/pay", s.agentAuth(s.cardPay))
 	s.mux.HandleFunc("POST /v1/edge/http/call", s.agentAuth(s.httpCall))
 	s.mux.HandleFunc("GET /v1/audit", s.ownerAuth(s.listAudit))
+	s.mux.HandleFunc("GET /v1/owner/handles", s.ownerAuth(s.ownerHandles))
+	s.mux.HandleFunc("GET /v1/owner/approvals", s.ownerAuth(s.ownerApprovals))
+	s.mux.HandleFunc("POST /v1/owner/approvals/{id}/approve", s.ownerAuth(s.ownerApprove))
+	s.mux.HandleFunc("POST /v1/owner/approvals/{id}/deny", s.ownerAuth(s.ownerDeny))
+	s.mux.HandleFunc("GET /v1/owner/grants", s.ownerAuth(s.ownerGrants))
+	s.mux.HandleFunc("POST /v1/owner/grants/{id}/revoke", s.ownerAuth(s.ownerRevoke))
+	s.mux.HandleFunc("GET /v1/owner/audit", s.ownerAuth(s.listAudit))
 	s.mux.HandleFunc("GET /capture/{token}", s.capturePage)
 	s.mux.HandleFunc("POST /capture/{token}/complete", s.captureComplete)
+	s.mux.HandleFunc("GET /wallet", s.walletPage)
+	s.mux.HandleFunc("GET /approve/{id}", s.walletPage)
 	return s
 }
 
@@ -116,10 +155,19 @@ func (s *Server) agentAuth(next func(http.ResponseWriter, *http.Request, *store.
 	}
 }
 
-// ownerAuth gates a handler behind VALET_MASTER_PASSWORD as a bearer token.
+// ownerAuth gates a handler behind VALET_MASTER_PASSWORD or
+// VALET_OWNER_TOKEN as a bearer token (either may be empty/disabled).
 func (s *Server) ownerAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if bearer(r) != os.Getenv("VALET_MASTER_PASSWORD") || os.Getenv("VALET_MASTER_PASSWORD") == "" {
+		tok := bearer(r)
+		ok := false
+		if mp := os.Getenv("VALET_MASTER_PASSWORD"); mp != "" {
+			ok = subtle.ConstantTimeCompare([]byte(tok), []byte(mp)) == 1
+		}
+		if !ok && s.ownerToken != "" {
+			ok = subtle.ConstantTimeCompare([]byte(tok), []byte(s.ownerToken)) == 1
+		}
+		if !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "owner auth required"})
 			return
 		}
@@ -322,7 +370,7 @@ type handleInfo struct {
 	Metadata string `json:"metadata"`
 }
 
-func (s *Server) handles(w http.ResponseWriter, r *http.Request, a *store.Agent) {
+func (s *Server) listHandles(w http.ResponseWriter, r *http.Request) {
 	creds, err := s.st.ListCredentials()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -340,6 +388,15 @@ func (s *Server) handles(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"handles": out})
+}
+
+func (s *Server) handles(w http.ResponseWriter, r *http.Request, a *store.Agent) {
+	s.listHandles(w, r)
+}
+
+// ownerHandles exposes the same handle list to the owner.
+func (s *Server) ownerHandles(w http.ResponseWriter, r *http.Request) {
+	s.listHandles(w, r)
 }
 
 // svcHost splits an Agent Vault service host pattern (host/path/*) into
@@ -363,6 +420,85 @@ type grantRequest struct {
 	Policy  *policy.Policy `json:"policy"`
 	TTL     int64          `json:"ttl"` // seconds
 	MaxUses int            `json:"max_uses"`
+	Purpose string         `json:"purpose"`
+}
+
+// approvalID returns a fresh random request id (16 bytes hex).
+func approvalID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// approveURL builds the human-facing link for a pending request. Relative
+// when VALET_PUBLIC_URL is unset.
+func approveURL(id string) string {
+	base := strings.TrimRight(os.Getenv("VALET_PUBLIC_URL"), "/")
+	return base + "/approve/" + id
+}
+
+// approvalRequired reports whether a grant request must wait for a human.
+func (s *Server) approvalRequired(credType string, p *policy.Policy) bool {
+	if p.RequireHuman {
+		return true
+	}
+	switch s.approvalMode {
+	case "all":
+		return true
+	case "none":
+		return false
+	default: // "card"
+		return credType == "card"
+	}
+}
+
+// signalWaiters wakes any long-polling grantRequestStatus handlers for id.
+func (s *Server) signalWaiters(id string) {
+	s.waitersMu.Lock()
+	defer s.waitersMu.Unlock()
+	if ch, ok := s.waiters[id]; ok {
+		delete(s.waiters, id)
+		close(ch)
+	}
+}
+
+// waiterChan returns (or creates) the notification channel for id.
+func (s *Server) waiterChan(id string) chan struct{} {
+	s.waitersMu.Lock()
+	defer s.waitersMu.Unlock()
+	ch, ok := s.waiters[id]
+	if !ok {
+		ch = make(chan struct{})
+		s.waiters[id] = ch
+	}
+	return ch
+}
+
+// notifyWebhook best-effort POSTs the pending request to VALET_APPROVAL_WEBHOOK.
+func (s *Server) notifyWebhook(a *store.Approval, agentName, label, policyJSON string) {
+	if s.approvalNotify == "" {
+		return
+	}
+	go func() {
+		body, _ := json.Marshal(map[string]any{
+			"request_id":  a.ID,
+			"agent":       agentName,
+			"handle":      a.Handle,
+			"label":       label,
+			"purpose":     a.Purpose,
+			"policy":      json.RawMessage(policyJSON),
+			"approve_url": approveURL(a.ID),
+		})
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Post(s.approvalNotify, "application/json", bytes.NewReader(body))
+		if err != nil {
+			slog.Debug("approval webhook failed", "error", err)
+			return
+		}
+		resp.Body.Close()
+	}()
 }
 
 func (s *Server) createGrant(w http.ResponseWriter, r *http.Request, a *store.Agent) {
@@ -396,16 +532,37 @@ func (s *Server) createGrant(w http.ResponseWriter, r *http.Request, a *store.Ag
 	if p == nil {
 		p = &policy.Policy{}
 	}
-	if p.RequireHuman {
-		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: cred.Handle, Edge: "control", Target: "grant", Decision: "pending_approval", Detail: "{}"})
-		writeJSON(w, http.StatusAccepted, map[string]string{"status": "pending_approval"})
+	pj, _ := json.Marshal(p)
+	if s.approvalRequired(cred.Type, p) {
+		id, err := approvalID()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		ap := &store.Approval{
+			ID: id, AgentID: a.ID, Handle: cred.Handle, Purpose: req.Purpose,
+			Policy: string(pj), TTL: time.Duration(req.TTL) * time.Second,
+			MaxUses: req.MaxUses, Status: "pending",
+			ExpiresAt: time.Now().UTC().Add(s.approvalTTL),
+		}
+		if err := s.st.CreateApproval(ap); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		detail, _ := json.Marshal(map[string]string{"request_id": id, "purpose": req.Purpose})
+		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: cred.Handle, Edge: "control", Target: "grant", Decision: "pending_approval", Detail: string(detail)})
+		s.notifyWebhook(ap, a.Name, cred.Label, string(pj))
+		slog.Info("approval requested", "request_id", id, "agent", a.Name, "handle", cred.Handle, "purpose", req.Purpose, "approve_url", approveURL(id))
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status": "pending_approval", "request_id": id,
+			"expires_at": ap.ExpiresAt, "approve_url": approveURL(id),
+		})
 		return
 	}
 	ttl := time.Duration(req.TTL) * time.Second
 	if ttl <= 0 {
 		ttl = 15 * time.Minute
 	}
-	pj, _ := json.Marshal(p)
 	token, g, err := s.issuer.Issue(a.ID, cred.Handle, string(pj), ttl, req.MaxUses)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -478,9 +635,11 @@ func (s *Server) browserFill(w http.ResponseWriter, r *http.Request, a *store.Ag
 			reason, code = "grant_expired", http.StatusUnauthorized
 		} else if errors.Is(err, grant.ErrExhausted) {
 			reason = "grant_exhausted"
+		} else if errors.Is(err, grant.ErrRevoked) {
+			reason = "grant_revoked"
 		}
 		s.auditDeny(a.ID, "", "browser", "", reason)
-		writeJSON(w, code, map[string]string{"error": reason})
+		writeJSON(w, code, map[string]string{"error": grantErrorMessage(err, reason)})
 		return
 	}
 	cred, err := s.st.GetCredential(g.Handle)
@@ -603,7 +762,7 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 	g, err := s.issuer.Verify(req.GrantToken, a.ID)
 	if err != nil {
 		s.auditDeny(a.ID, "", "card", "", grantReason(err))
-		writeJSON(w, grantStatus(err), map[string]string{"error": "invalid grant"})
+		writeJSON(w, grantStatus(err), map[string]string{"error": grantErrorMessage(err, grantReason(err))})
 		return
 	}
 	kind, _, _, err := handle.Parse(g.Handle)
@@ -690,7 +849,7 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 	}
 	if _, err := s.issuer.Consume(req.GrantToken, a.ID); err != nil {
 		s.auditDeny(a.ID, g.Handle, "card", merchant, grantReason(err))
-		writeJSON(w, grantStatus(err), map[string]string{"error": "invalid grant"})
+		writeJSON(w, grantStatus(err), map[string]string{"error": grantErrorMessage(err, grantReason(err))})
 		return
 	}
 	res, err := card.Do(r.Context(), prov, freq, fields)
@@ -736,7 +895,7 @@ func (s *Server) httpCall(w http.ResponseWriter, r *http.Request, a *store.Agent
 	g, err := s.issuer.Verify(req.Grant, a.ID)
 	if err != nil {
 		s.auditDeny(a.ID, "", "http", "", grantReason(err))
-		writeJSON(w, grantStatus(err), map[string]string{"error": "invalid grant"})
+		writeJSON(w, grantStatus(err), map[string]string{"error": grantErrorMessage(err, grantReason(err))})
 		return
 	}
 	kind, _, label, err := handle.Parse(g.Handle)
@@ -786,7 +945,7 @@ func (s *Server) httpCall(w http.ResponseWriter, r *http.Request, a *store.Agent
 	}
 	if _, err := s.issuer.Consume(req.Grant, a.ID); err != nil {
 		s.auditDeny(a.ID, g.Handle, "http", target, grantReason(err))
-		writeJSON(w, grantStatus(err), map[string]string{"error": "invalid grant"})
+		writeJSON(w, grantStatus(err), map[string]string{"error": grantErrorMessage(err, grantReason(err))})
 		return
 	}
 	res, err := s.egress.Do(r.Context(), egress.Request{Method: req.Method, URL: req.URL, Headers: req.Headers, Body: []byte(req.Body)})
@@ -807,9 +966,22 @@ func grantReason(err error) string {
 		return "grant_expired"
 	case errors.Is(err, grant.ErrExhausted):
 		return "grant_exhausted"
+	case errors.Is(err, grant.ErrRevoked):
+		return "grant_revoked"
 	default:
 		return "grant_invalid"
 	}
+}
+
+// grantErrorMessage is the agent-facing error text for a verify failure.
+func grantErrorMessage(err error, reason string) string {
+	if errors.Is(err, grant.ErrRevoked) {
+		return "grant revoked"
+	}
+	if reason == "grant_invalid" {
+		return "invalid grant"
+	}
+	return reason
 }
 
 func grantStatus(err error) int {
@@ -844,4 +1016,269 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"audit": entries})
+}
+
+// expireIfStale lazily marks a pending approval past its TTL as expired.
+func (s *Server) expireIfStale(ap *store.Approval) {
+	if ap.Status == "pending" && time.Now().After(ap.ExpiresAt) {
+		if err := s.st.DecideApproval(ap.ID, "expired", "", nil); err == nil || errors.Is(err, store.ErrNotFound) {
+			ap.Status = "expired"
+			s.signalWaiters(ap.ID)
+		}
+	}
+}
+
+// grantRequestStatus lets an agent poll (or long-poll) its own approval.
+func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *store.Agent) {
+	id := r.PathValue("id")
+	ap, err := s.st.GetApproval(id)
+	if err != nil || ap.AgentID != a.ID {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "request not found"})
+		return
+	}
+	waitSec, _ := strconv.Atoi(r.URL.Query().Get("wait"))
+	if waitSec < 0 {
+		waitSec = 0
+	}
+	if waitSec > 120 {
+		waitSec = 120
+	}
+	deadline := time.Now().Add(time.Duration(waitSec) * time.Second)
+	for {
+		s.expireIfStale(ap)
+		if ap.Status != "pending" {
+			resp := map[string]any{"status": ap.Status, "request_id": ap.ID}
+			if ap.Status == "approved" {
+				tok, derr := crypto.Decrypt(s.dek, ap.TokenCT)
+				if derr != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "token decrypt failed"})
+					return
+				}
+				resp["grant_id"] = ap.GrantID
+				resp["token"] = string(tok)
+				if g, gerr := s.st.GetGrant(ap.GrantID); gerr == nil {
+					resp["expires_at"] = g.ExpiresAt
+				}
+			}
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		if waitSec == 0 || !time.Now().Before(deadline) {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "pending", "request_id": ap.ID})
+			return
+		}
+		ch := s.waiterChan(ap.ID)
+		timer := time.NewTimer(time.Until(deadline))
+		select {
+		case <-ch:
+		case <-timer.C:
+		case <-r.Context().Done():
+			timer.Stop()
+			return
+		}
+		timer.Stop()
+		ap, err = s.st.GetApproval(id)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "request not found"})
+			return
+		}
+	}
+}
+
+type ownerApprovalView struct {
+	ID        string          `json:"id"`
+	Agent     string          `json:"agent"`
+	Handle    string          `json:"handle"`
+	Type      string          `json:"type"`
+	Label     string          `json:"label"`
+	Site      string          `json:"site"`
+	Metadata  string          `json:"metadata"`
+	Purpose   string          `json:"purpose"`
+	Policy    json.RawMessage `json:"policy"`
+	TTL       int64           `json:"ttl"`
+	MaxUses   int             `json:"max_uses"`
+	Status    string          `json:"status"`
+	GrantID   string          `json:"grant_id"`
+	CreatedAt time.Time       `json:"created_at"`
+	ExpiresAt time.Time       `json:"expires_at"`
+	DecidedAt *time.Time      `json:"decided_at"`
+}
+
+// approvalView renders an approval for owner consumption.
+func (s *Server) approvalView(ap *store.Approval) ownerApprovalView {
+	kind, site, label, _ := handle.Parse(ap.Handle)
+	v := ownerApprovalView{
+		ID: ap.ID, Handle: ap.Handle, Type: kind, Site: site, Label: label,
+		Purpose: ap.Purpose, Policy: json.RawMessage(ap.Policy),
+		TTL: int64(ap.TTL / time.Second), MaxUses: ap.MaxUses, Status: ap.Status,
+		GrantID: ap.GrantID, CreatedAt: ap.CreatedAt, ExpiresAt: ap.ExpiresAt,
+		DecidedAt: ap.DecidedAt,
+	}
+	if ag, err := s.st.GetAgent(ap.AgentID); err == nil {
+		v.Agent = ag.Name
+	}
+	if kind != "api" {
+		if c, err := s.st.GetCredential(ap.Handle); err == nil {
+			v.Metadata = c.Metadata
+			if c.Label != "" {
+				v.Label = c.Label
+			}
+			if c.Site != "" {
+				v.Site = c.Site
+			}
+		}
+	}
+	return v
+}
+
+func (s *Server) ownerApprovals(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	list, err := s.st.ListApprovals(status)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := []ownerApprovalView{}
+	for i := range list {
+		s.expireIfStale(&list[i])
+		if status == "pending" && list[i].Status != "pending" {
+			continue
+		}
+		out = append(out, s.approvalView(&list[i]))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": out})
+}
+
+func (s *Server) ownerApprove(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	ap, err := s.st.GetApproval(id)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "not pending"})
+		return
+	}
+	s.expireIfStale(ap)
+	if ap.Status != "pending" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "not pending"})
+		return
+	}
+	ttl := ap.TTL
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
+	token, g, err := s.issuer.Issue(ap.AgentID, ap.Handle, ap.Policy, ttl, ap.MaxUses)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	ct, err := crypto.Encrypt(s.dek, []byte(token))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "encrypt failed"})
+		return
+	}
+	if err := s.st.DecideApproval(id, "approved", g.ID, ct); err != nil {
+		// Lost a race against another decider — undo the issued grant.
+		_ = s.st.RevokeGrant(g.ID)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "not pending"})
+		return
+	}
+	detail, _ := json.Marshal(map[string]string{"request_id": id, "grant_id": g.ID, "via": "owner"})
+	_ = s.chain.Append(&store.AuditEntry{AgentID: ap.AgentID, Handle: ap.Handle, Edge: "control", Target: "grant", Decision: "granted", Detail: string(detail)})
+	s.signalWaiters(id)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "grant_id": g.ID, "expires_at": g.ExpiresAt})
+}
+
+func (s *Server) ownerDeny(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	ap, err := s.st.GetApproval(id)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "not pending"})
+		return
+	}
+	s.expireIfStale(ap)
+	if ap.Status != "pending" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "not pending"})
+		return
+	}
+	if err := s.st.DecideApproval(id, "denied", "", nil); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "not pending"})
+		return
+	}
+	detail, _ := json.Marshal(map[string]string{"request_id": id, "via": "owner"})
+	_ = s.chain.Append(&store.AuditEntry{AgentID: ap.AgentID, Handle: ap.Handle, Edge: "control", Target: "grant", Decision: "denied", Detail: string(detail)})
+	s.signalWaiters(id)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "denied"})
+}
+
+type ownerGrantView struct {
+	ID        string          `json:"id"`
+	Agent     string          `json:"agent"`
+	Handle    string          `json:"handle"`
+	Label     string          `json:"label"`
+	Type      string          `json:"type"`
+	Policy    json.RawMessage `json:"policy"`
+	ExpiresAt time.Time       `json:"expires_at"`
+	MaxUses   int             `json:"max_uses"`
+	Uses      int             `json:"uses"`
+	CreatedAt time.Time       `json:"created_at"`
+	RevokedAt *time.Time      `json:"revoked_at"`
+	Active    bool            `json:"active"`
+}
+
+func (s *Server) ownerGrants(w http.ResponseWriter, r *http.Request) {
+	grants, err := s.st.ListGrants()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := []ownerGrantView{}
+	for _, g := range grants {
+		kind, _, label, _ := handle.Parse(g.Handle)
+		v := ownerGrantView{
+			ID: g.ID, Handle: g.Handle, Type: kind, Label: label,
+			Policy: json.RawMessage(g.Policy), ExpiresAt: g.ExpiresAt,
+			MaxUses: g.MaxUses, Uses: g.Uses, CreatedAt: g.CreatedAt,
+			RevokedAt: g.RevokedAt,
+		}
+		if ag, err := s.st.GetAgent(g.AgentID); err == nil {
+			v.Agent = ag.Name
+		}
+		if c, err := s.st.GetCredential(g.Handle); err == nil && c.Label != "" {
+			v.Label = c.Label
+		}
+		v.Active = v.RevokedAt == nil && time.Now().Before(g.ExpiresAt) && (g.MaxUses == 0 || g.Uses < g.MaxUses)
+		out = append(out, v)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"grants": out})
+}
+
+func (s *Server) ownerRevoke(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.st.RevokeGrant(id); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "grant not found"})
+		return
+	}
+	g, _ := s.st.GetGrant(id)
+	detail, _ := json.Marshal(map[string]string{"grant_id": id, "via": "owner"})
+	e := &store.AuditEntry{Edge: "control", Target: "grant", Decision: "revoked", Detail: string(detail)}
+	if g != nil {
+		e.AgentID = g.AgentID
+		e.Handle = g.Handle
+	}
+	_ = s.chain.Append(e)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+//go:embed wallet.html
+var walletHTML []byte
+
+const walletCSP = "default-src 'none'; script-src 'self' 'unsafe-inline'; " +
+	"style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:"
+
+// walletPage serves the owner wallet/approval SPA; the page reads the
+// request id from its own URL, so no templating is applied.
+func (s *Server) walletPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", walletCSP)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(walletHTML)
 }
