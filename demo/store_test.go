@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -53,6 +54,16 @@ func TestStoreCheckout(t *testing.T) {
 	a.checkoutHandler(w, r)
 	if w.Code != 400 {
 		t.Fatalf("unknown product: want 400, got %d", w.Code)
+	}
+	// Qty outside 1-10 → 400.
+	for _, qty := range []int{0, 11} {
+		body = fmt.Sprintf(`{"order":{"items":[{"id":"coffee","qty":%d}]},"card":{"number":"4111111111111111"}}`, qty)
+		r = httptest.NewRequest("POST", "/store/checkout", strings.NewReader(body))
+		w = httptest.NewRecorder()
+		a.checkoutHandler(w, r)
+		if w.Code != 400 {
+			t.Fatalf("qty=%d: want 400, got %d", qty, w.Code)
+		}
 	}
 }
 

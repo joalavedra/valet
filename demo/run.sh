@@ -32,9 +32,26 @@ fi
 
 export DEMO_PUBLIC_URL="$URL"
 export VALET_PUBLIC_URL="$URL/valet"
-export VALET_MASTER_PASSWORD="${VALET_MASTER_PASSWORD:-valet-demo-master-$(date +%s | sha256sum | cut -c1-16)}"
-export VALET_OWNER_TOKEN="${VALET_OWNER_TOKEN:-vlt_owner_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
-export DEMO_PASSWORD="${DEMO_PASSWORD:-$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
+
+# Generate secrets once and persist them in .env — the compose DB survives
+# relaunches, so re-generating the master password would break decryption.
+touch .env
+persist() { # NAME=value → export + append to .env if unset
+  local name="$1" value="$2"
+  if [ -z "${!name:-}" ]; then
+    export "$name=$value"
+    grep -q "^$name=" .env || echo "$name=$value" >> .env
+  fi
+}
+persist VALET_MASTER_PASSWORD "valet-demo-master-$(date +%s | sha256sum | cut -c1-16)"
+persist VALET_OWNER_TOKEN "vlt_owner_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+persist DEMO_PASSWORD "$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+
+if [ -n "${VGS_CLIENT_ID:-}" ] && [ -n "${VGS_CLIENT_SECRET:-}" ] && [ -n "${VGS_VAULT_ID:-}" ]; then
+  DEMO_PUBLIC_URL="$URL" ./vgs-route.sh || echo "warning: vgs-route.sh failed — purchases will be declined" >&2
+else
+  echo "warning: VGS_* not set — skipping reveal route; purchases will fail" >&2
+fi
 
 echo "DEMO_PUBLIC_URL=$DEMO_PUBLIC_URL"
 echo "login: demo / $DEMO_PASSWORD"

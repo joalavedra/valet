@@ -48,7 +48,9 @@ Then in chat: "Buy the coffee beans" → approve the bottom-sheet → receipt.
 | `VALET_REQUIRE_APPROVAL` | `card` (compose default) — makes `card://` grants human-approved |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | Gemini REST (default `gemini-2.5-flash`) |
 | `DEMO_CARD_LABEL` | card handle label (default `personal`) |
-| `VGS_*` | vault creds for `cred add --tokenize` and `vgs-route.sh` |
+| `VGS_CLIENT_ID`/`VGS_CLIENT_SECRET` | service-account OAuth for tokenize + `vgs-route.sh` |
+| `VGS_USERNAME`/`VGS_PASSWORD` | vault access credentials — the outbound proxy auth Valet uses for payments |
+| `VGS_VAULT_ID`/`VGS_ENV` | `tnt…` vault id; `sandbox` (default) or `live` |
 
 ## Money flow
 

@@ -124,8 +124,13 @@ func (a *chatAgent) runTool(ctx context.Context, fc *geminiFunctionCall, emit ss
 	case "checkout":
 		id, _ := fc.Args["product_id"].(string)
 		qty := 1
-		if q, ok := fc.Args["qty"].(float64); ok && q > 0 {
-			qty = int(q)
+		if q, ok := fc.Args["qty"].(float64); ok {
+			if q > 10 {
+				return map[string]any{"status": "error", "reason": "qty must be 1-10"}
+			}
+			if q > 0 {
+				qty = int(q)
+			}
 		}
 		return a.app.agentCheckout(ctx, id, qty, emit)
 	default:
@@ -142,7 +147,7 @@ func (a *app) agentCheckout(ctx context.Context, productID string, qty int, emit
 	total := p.PriceCents * int64(qty)
 	merchant := ""
 	if u, err := url.Parse(a.cfg.PublicURL); err == nil {
-		merchant = u.Host
+		merchant = u.Hostname()
 	}
 	purpose := fmt.Sprintf("Buy %dx %s at Valet Demo Store", qty, p.Name)
 	pol := map[string]any{
@@ -190,11 +195,11 @@ func (a *app) agentCheckout(ctx context.Context, productID string, qty int, emit
 		return map[string]any{"status": "error", "reason": "no grant token"}
 	}
 	orderJSON, _ := json.Marshal(map[string]any{"items": []orderItem{{ID: productID, Qty: qty}}})
-	body := fmt.Sprintf(`{"order":%s,"card":{"number":"{{card.number}}","exp_month":"{{card.exp_month}}","exp_year":"{{card.exp_year}}","cvc":"{{card.cvc}}","holder":"{{card.holder}}"}}`, orderJSON)
+	body := fmt.Sprintf(`{"order":%s,"card":{"number":"{{card.number}}","exp_month":"{{card.exp_month}}","exp_year":"{{card.exp_year}}","cvc":"{{card.cvc}}"}}`, orderJSON)
 	res, err := a.valet.pay(ctx, grantToken, a.cfg.PublicURL+"/store/checkout", string(body), total, "USD")
 	if err != nil && strings.Contains(err.Error(), "need_cvc") {
 		// Stored card has no CVC on file — retry without the field.
-		body = fmt.Sprintf(`{"order":%s,"card":{"number":"{{card.number}}","exp_month":"{{card.exp_month}}","exp_year":"{{card.exp_year}}","holder":"{{card.holder}}"}}`, orderJSON)
+		body = fmt.Sprintf(`{"order":%s,"card":{"number":"{{card.number}}","exp_month":"{{card.exp_month}}","exp_year":"{{card.exp_year}}"}}`, orderJSON)
 		res, err = a.valet.pay(ctx, grantToken, a.cfg.PublicURL+"/store/checkout", string(body), total, "USD")
 	}
 	if err != nil {

@@ -38,7 +38,8 @@ services:
           [ -f /data/valet.db ] && break; sleep 1
         done
         if [ ! -s /data/demo-agent.token ]; then
-          VALET_DB=/data/valet.db /valet agent create demo > /data/demo-agent.token 2>/dev/null || true
+          VALET_DB=/data/valet.db /valet agent create demo > /data/demo-agent.token \
+            || { rm -f /data/demo-agent.token; echo "agent create failed" >&2; exit 1; }
         fi
         chown 65532:65532 /data/demo-agent.token 2>/dev/null || true
     volumes:

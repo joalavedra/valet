@@ -108,8 +108,12 @@ func (a *app) checkoutHandler(w http.ResponseWriter, r *http.Request) {
 	var total int64
 	for _, it := range req.Order.Items {
 		p := a.store.byID(it.ID)
-		if p == nil || it.Qty <= 0 {
+		if p == nil {
 			writeJSON(w, 400, map[string]string{"error": "unknown product " + it.ID})
+			return
+		}
+		if it.Qty < 1 || it.Qty > 10 {
+			writeJSON(w, 400, map[string]string{"error": "bad qty"})
 			return
 		}
 		total += p.PriceCents * int64(it.Qty)
