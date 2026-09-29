@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/joalavedra/valet/internal/server"
 	"github.com/joalavedra/valet/internal/store"
 )
 
@@ -42,18 +43,7 @@ var cardCaptureCmd = &cobra.Command{
 		}); err != nil {
 			return err
 		}
-		base := os.Getenv("VALET_PUBLIC_URL")
-		if base == "" {
-			listen := os.Getenv("VALET_LISTEN")
-			if listen == "" {
-				listen = ":14400"
-			}
-			host := listen
-			if len(host) > 0 && host[0] == ':' {
-				host = "localhost" + host
-			}
-			base = "http://" + host
-		}
+		base := server.PublicBase()
 		fmt.Printf("Open in the cardholder's browser: %s/capture/%s\n", base, token)
 		fmt.Printf("Link expires at %s and works once.\n", expires.UTC().Format(time.RFC3339))
 		if u, err := url.Parse(base); err == nil && u.Scheme == "http" {

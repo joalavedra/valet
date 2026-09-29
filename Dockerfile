@@ -10,6 +10,13 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /valet . \
     && mkdir -p /data
 
+# One-shot init image (compose demos): shell + binary so a script can create
+# agents/credentials against the shared /data DB. Reuses the build base so it
+# needs no extra pull.
+FROM golang:1.26-alpine AS init
+COPY --from=build /valet /valet
+ENTRYPOINT ["/bin/sh", "-c"]
+
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /valet /valet
 # Fresh named volumes mount over /data root-owned; pre-create it as nonroot.

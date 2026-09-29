@@ -13,6 +13,10 @@ coverage.out
 # Go
 /vendor/
 
+# Demo secrets
+demo/.env
+.env
+
 # Editors
 .idea/
 .vscode/

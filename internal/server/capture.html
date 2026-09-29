@@ -46,6 +46,7 @@
 </form>
 <script>
 var state = {};
+var returnURL = {{.ReturnURL}};
 var form = VGSCollect.create({{.VaultID}}, {{.Env}}, function(s) { state = s; document.getElementById('btn').disabled = false; });
 form.field('#cc-number', {name:'number', type:'card-number', placeholder:'Card number',
   validations:['required','validCardNumber'], autoComplete:'cc-number',
@@ -91,14 +92,21 @@ document.getElementById('f').addEventListener('submit', function(e) {
       if (state.number.last4) last4 = state.number.last4;
       if (state.number.bin) bin = state.number.bin;
     }
-    fetch('/capture/{{.Token}}/complete', {method:'POST', headers:{'Content-Type':'application/json'},
+    fetch(window.location.pathname.replace(/\/+$/, '') + '/complete', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({number:num, cvc:cvc,
         exp_month:document.getElementById('exp_month').value,
         exp_year:document.getElementById('exp_year').value,
         holder:document.getElementById('holder').value,
         last4:last4, bin:bin})})
       .then(function(r){return r.json().then(function(j){return {r:r,j:j}})})
-      .then(function(x){ msg.textContent = x.r.ok ? 'Card captured. You can close this page.' : ('Error: ' + (x.j.error || x.r.status)); })
+      .then(function(x){
+        if (x.r.ok && returnURL) {
+          msg.textContent = 'Card saved. Returning…';
+          setTimeout(function(){ window.location = returnURL; }, 1500);
+          return;
+        }
+        msg.textContent = x.r.ok ? 'Card captured. You can close this page.' : ('Error: ' + (x.j.error || x.r.status));
+      })
       .catch(function(err){ msg.textContent = 'Error: ' + err; });
   }, function(status, errors) {
     if (typeof status === 'string') {
