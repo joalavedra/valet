@@ -31,14 +31,15 @@ type config struct {
 }
 
 type app struct {
-	cfg    config
-	store  *demoStore
-	valet  *valetClient
-	gemini *geminiClient
-	agent  *chatAgent
-	mu     sync.Mutex
-	orders []order
-	convs  map[string][]geminiContent
+	cfg     config
+	store   *demoStore
+	valet   *valetClient
+	gemini  *geminiClient
+	agent   *chatAgent
+	mu      sync.Mutex
+	orders  []order
+	convs   map[string][]geminiContent
+	pending map[string]string // conversation_id -> pending approval request id
 }
 
 func main() {
@@ -61,10 +62,11 @@ func main() {
 		}
 	}
 	a := &app{
-		cfg:   cfg,
-		store: newDemoStore(),
-		valet: newValetClient(cfg.ValetURL, cfg.AgentToken, cfg.OwnerToken),
-		convs: map[string][]geminiContent{},
+		cfg:     cfg,
+		store:   newDemoStore(),
+		valet:   newValetClient(cfg.ValetURL, cfg.AgentToken, cfg.OwnerToken),
+		convs:   map[string][]geminiContent{},
+		pending: map[string]string{},
 	}
 	a.gemini = newGeminiClient(cfg.GeminiKey, cfg.GeminiModel)
 	a.agent = newChatAgent(a)

@@ -90,6 +90,7 @@
 const $ = id => document.getElementById(id);
 const conv = 'conv_' + Math.random().toString(36).slice(2, 10);
 let sheetReq = null;
+let currentApprovalId = null;
 
 function money(c) { return '$' + (c / 100).toFixed(2); }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
@@ -110,40 +111,85 @@ async function send() {
   const text = $('msg').value.trim(); if (!text) return;
   $('msg').value = '';
   bubble('bubble user', esc(text));
-  const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({conversation_id: conv, message: text})});
-  const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
-  while (true) {
-    const {done, value} = await reader.read(); if (done) break;
-    buf += dec.decode(value, {stream:true});
-    let i; while ((i = buf.indexOf('\n\n')) >= 0) {
-      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
-      const ev = /event: (\S+)/.exec(chunk), dt = /data: (.*)/s.exec(chunk);
-      if (!ev || !dt) continue;
-      const d = JSON.parse(dt[1]);
-      if (ev[1] === 'text') bubble('bubble bot', esc(d.content));
-      if (ev[1] === 'tool') bubble('sys', `→ ${esc(d.name)} ${esc(d.args || '')}`);
-      if (ev[1] === 'approval_required') openSheet(d);
-      if (ev[1] === 'receipt') receipt(d);
-      if (ev[1] === 'error') bubble('sys', 'Error: ' + esc(d.error));
+  const pollTimer = setInterval(pollPending, 3000);
+  let gotDone = false;
+  try {
+    const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({conversation_id: conv, message: text})});
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    while (true) {
+      const {done, value} = await reader.read(); if (done) break;
+      buf += dec.decode(value, {stream:true});
+      let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const ev = /event: (\S+)/.exec(chunk), dt = /data: (.*)/s.exec(chunk);
+        if (!ev || !dt) continue;
+        const d = JSON.parse(dt[1]);
+        if (ev[1] === 'text') bubble('bubble bot', esc(d.content));
+        if (ev[1] === 'tool') bubble('sys', `→ ${esc(d.name)} ${esc(d.args || '')}`);
+        if (ev[1] === 'approval_required') showApproval(d);
+        if (ev[1] === 'receipt') receipt(d);
+        if (ev[1] === 'error') bubble('sys', 'Error: ' + esc(d.error));
+        if (ev[1] === 'done') gotDone = true;
+      }
+    }
+  } catch (e) {
+    bubble('sys', 'Connection lost');
+  } finally {
+    clearInterval(pollTimer);
+    // The stream ended without a done event (Safari may drop fetch streams):
+    // keep polling pending approvals for up to 60s as a fallback.
+    if (!gotDone) {
+      bubble('sys', 'Waiting for approval…');
+      const t0 = Date.now();
+      const t = setInterval(async () => {
+        await pollPending();
+        if (currentApprovalId || Date.now() - t0 > 60000) clearInterval(t);
+      }, 3000);
     }
   }
 }
 $('send').onclick = send;
 $('msg').addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 
-function openSheet(d) {
+function showApproval(d) {
+  if (!d || !d.request_id) return;
+  if (currentApprovalId === d.request_id && $('sheet').classList.contains('open')) return;
+  currentApprovalId = d.request_id;
   sheetReq = d.request_id;
-  $('sh-amt').textContent = money(d.amount_cents);
-  $('sh-merchant').textContent = d.merchant;
-  $('sh-purpose').textContent = d.purpose;
+  $('sh-amt').textContent = money(d.amount_cents || 0);
+  $('sh-merchant').textContent = d.merchant || '';
+  $('sh-purpose').textContent = d.purpose || '';
   $('sh-exp').textContent = d.expires_at ? new Date(d.expires_at).toLocaleTimeString() : '';
   $('sheet').classList.add('open');
 }
+// Fallback path: /api/state.pending_approvals carries the same request id,
+// normalized here into the approval_required event shape.
+async function pollPending() {
+  try {
+    const s = await (await fetch('/api/state')).json();
+    const p = (s.pending_approvals || [])[0];
+    if (p && p.id) {
+      const spend = (p.policy && p.policy.spend) || {};
+      showApproval({
+        request_id: p.id, purpose: p.purpose || '',
+        amount_cents: spend.per_tx || 0,
+        merchant: (spend.merchants || [''])[0],
+        expires_at: p.expires_at || '',
+        agent: 'Valet Shopping Agent'
+      });
+    }
+  } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pollPending(); });
+window.addEventListener('focus', pollPending);
+
 async function decide(action) {
   await fetch('/api/approvals/' + sheetReq + '/' + action, {method:'POST'});
   $('sheet').classList.remove('open');
+  currentApprovalId = null;
   bubble('sys', action === 'approve' ? 'You approved the purchase' : 'You denied the purchase');
+  pollPending();
 }
 $('sh-allow').onclick = () => decide('approve');
 $('sh-deny').onclick = () => decide('deny');
@@ -183,6 +229,7 @@ $('tab-wallet').onclick = () => { $('tab-wallet').classList.add('on'); $('tab-ch
 if (new URLSearchParams(location.search).get('saved')) toast('Card saved');
 loadWallet().then(() => { fetch('/api/state').then(r=>r.json()).then(s => { if (!s.card_saved) $('sub').textContent = '— no card yet'; }); });
 bubble('sys', 'Chat with the shopping agent — payments need your approval.');
+pollPending();
 </script>
 </body>
 </html>
