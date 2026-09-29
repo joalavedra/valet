@@ -1,0 +1,73 @@
+services:
+  valet:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: demo
+    environment:
+      VALET_LISTEN: ":14400"
+      VALET_DB: /data/valet.db
+      VALET_MASTER_PASSWORD: ${VALET_MASTER_PASSWORD}
+      VALET_OWNER_TOKEN: ${VALET_OWNER_TOKEN}
+      VALET_PUBLIC_URL: ${VALET_PUBLIC_URL:-}
+      VALET_REQUIRE_APPROVAL: card
+      VALET_APPROVAL_TTL: 10m
+      VALET_CDP_URL: ""
+      VGS_VAULT_ID: ${VGS_VAULT_ID:-}
+      VGS_ENV: ${VGS_ENV:-sandbox}
+      VGS_USERNAME: ${VGS_USERNAME:-}
+      VGS_PASSWORD: ${VGS_PASSWORD:-}
+      VGS_CA_FILE: ${VGS_CA_FILE:-}
+      VGS_CLIENT_ID: ${VGS_CLIENT_ID:-}
+      VGS_CLIENT_SECRET: ${VGS_CLIENT_SECRET:-}
+    volumes:
+      - valet-data:/data
+    expose: ["14400"]
+
+  valet-init:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: init
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for i in $$(seq 1 60); do
+          [ -f /data/valet.db ] && break; sleep 1
+        done
+        if [ ! -s /data/demo-agent.token ]; then
+          VALET_DB=/data/valet.db /valet agent create demo > /data/demo-agent.token 2>/dev/null || true
+        fi
+        chown 65532:65532 /data/demo-agent.token 2>/dev/null || true
+    volumes:
+      - valet-data:/data
+    depends_on:
+      valet:
+        condition: service_started
+
+  demo:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+    environment:
+      DEMO_LISTEN: ":8080"
+      DEMO_PUBLIC_URL: ${DEMO_PUBLIC_URL}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-}
+      VALET_URL: http://valet:14400
+      VALET_AGENT_TOKEN_FILE: /data/demo-agent.token
+      VALET_OWNER_TOKEN: ${VALET_OWNER_TOKEN}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      DEMO_CARD_LABEL: ${DEMO_CARD_LABEL:-personal}
+    volumes:
+      - valet-data:/data:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      valet-init:
+        condition: service_completed_successfully
+
+volumes:
+  valet-data:
