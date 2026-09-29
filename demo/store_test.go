@@ -10,7 +10,7 @@ import (
 )
 
 func testApp() *app {
-	return &app{cfg: config{CardLabel: "personal"}, store: newDemoStore(), convs: map[string][]geminiContent{}}
+	return &app{cfg: config{CardLabel: "personal"}, store: newDemoStore(), convs: map[string][]geminiContent{}, pending: map[string]*pendingApproval{}}
 }
 
 func TestLuhn(t *testing.T) {

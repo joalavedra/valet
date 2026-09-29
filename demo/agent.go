@@ -48,6 +48,7 @@ func (a *app) chatHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, 500, map[string]string{"error": "no streaming"})
@@ -93,7 +94,7 @@ func (a *app) chatHandler(w http.ResponseWriter, r *http.Request) {
 		for _, p := range calls {
 			fc := p.FunctionCall
 			emit("tool", map[string]any{"name": fc.Name, "args": summarizeArgs(fc.Name, fc.Args)})
-			res := a.agent.runTool(ctx, fc, emit)
+			res := a.agent.runTool(ctx, req.ConversationID, fc, emit)
 			responses = append(responses, geminiPart{FunctionResponse: &geminiFunctionResponse{Name: fc.Name, Response: res}})
 		}
 		history = append(history, geminiContent{Role: "user", Parts: responses})
@@ -117,7 +118,7 @@ func summarizeArgs(name string, args map[string]any) string {
 	}
 }
 
-func (a *chatAgent) runTool(ctx context.Context, fc *geminiFunctionCall, emit sseEmit) map[string]any {
+func (a *chatAgent) runTool(ctx context.Context, convID string, fc *geminiFunctionCall, emit sseEmit) map[string]any {
 	switch fc.Name {
 	case "list_products":
 		return map[string]any{"products": a.app.store.products}
@@ -132,14 +133,14 @@ func (a *chatAgent) runTool(ctx context.Context, fc *geminiFunctionCall, emit ss
 				qty = int(q)
 			}
 		}
-		return a.app.agentCheckout(ctx, id, qty, emit)
+		return a.app.agentCheckout(ctx, convID, id, qty, emit)
 	default:
 		return map[string]any{"status": "error", "reason": "unknown tool"}
 	}
 }
 
 // agentCheckout runs the Valet grant → approval → pay pipeline for one item.
-func (a *app) agentCheckout(ctx context.Context, productID string, qty int, emit sseEmit) map[string]any {
+func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty int, emit sseEmit) map[string]any {
 	p := a.store.byID(productID)
 	if p == nil {
 		return map[string]any{"status": "error", "reason": "unknown product"}
@@ -156,14 +157,54 @@ func (a *app) agentCheckout(ctx context.Context, productID string, qty int, emit
 			"merchants": []string{merchant},
 		},
 	}
+	// Per-conversation dedupe: at most one pending grant request. A reserved
+	// entry means requestGrant is in flight; an id entry is a live approval.
+	a.mu.Lock()
+	pa := a.pending[convID]
+	if pa == nil {
+		a.pending[convID] = &pendingApproval{reserved: true}
+	}
+	a.mu.Unlock()
+	pendingReason := map[string]any{"status": "pending_approval", "reason": "a purchase is already awaiting the owner's approval"}
+	if pa != nil {
+		if pa.reserved {
+			return pendingReason
+		}
+		st, err := a.valet.grantRequestStatus(ctx, pa.id, 0)
+		if err == nil && st["status"] == "pending" {
+			emit("approval_required", map[string]any{
+				"request_id": pa.id, "purpose": pa.purpose, "amount_cents": pa.total,
+				"merchant": pa.merchant, "expires_at": pa.expiresAt, "agent": "Valet Shopping Agent",
+			})
+			return pendingReason
+		}
+		a.mu.Lock()
+		if a.pending[convID] != pa {
+			a.mu.Unlock()
+			return pendingReason
+		}
+		a.pending[convID] = &pendingApproval{reserved: true}
+		a.mu.Unlock()
+	}
+	clearPending := func() {
+		a.mu.Lock()
+		delete(a.pending, convID)
+		a.mu.Unlock()
+	}
 	out, err := a.valet.requestGrant(ctx, "card://"+a.cfg.CardLabel, purpose, 600, 1, pol)
 	if err != nil {
+		clearPending()
 		return map[string]any{"status": "error", "reason": "grant request failed"}
 	}
 	var grantToken string
 	if out["status"] == "pending_approval" {
 		rid, _ := out["request_id"].(string)
 		exp, _ := out["expires_at"].(string)
+		a.mu.Lock()
+		a.pending[convID] = &pendingApproval{
+			id: rid, purpose: purpose, total: int(total), merchant: merchant, expiresAt: exp,
+		}
+		a.mu.Unlock()
 		emit("approval_required", map[string]any{
 			"request_id": rid, "purpose": purpose, "amount_cents": total,
 			"merchant": merchant, "expires_at": exp, "agent": "Valet Shopping Agent",
@@ -171,10 +212,16 @@ func (a *app) agentCheckout(ctx context.Context, productID string, qty int, emit
 		deadline := time.Now().Add(5 * time.Minute)
 		for {
 			if time.Now().After(deadline) {
+				clearPending()
 				return map[string]any{"status": "expired", "reason": "approval timed out"}
 			}
 			st, err := a.valet.grantRequestStatus(ctx, rid, 60)
 			if err != nil {
+				if ctx.Err() == nil {
+					// Genuine poll failure — clear. On client disconnect the
+					// approval is still live; the next buy should reuse it.
+					clearPending()
+				}
 				return map[string]any{"status": "error", "reason": "approval poll failed"}
 			}
 			switch st["status"] {
@@ -183,12 +230,15 @@ func (a *app) agentCheckout(ctx context.Context, productID string, qty int, emit
 			case "pending":
 				continue
 			default:
+				clearPending()
 				s, _ := st["status"].(string)
 				return map[string]any{"status": s}
 			}
 			break
 		}
+		clearPending()
 	} else {
+		clearPending()
 		grantToken, _ = out["token"].(string)
 	}
 	if grantToken == "" {
