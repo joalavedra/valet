@@ -1045,6 +1045,14 @@ func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *s
 	}
 	deadline := time.Now().Add(time.Duration(waitSec) * time.Second)
 	for {
+		// Register the waiter before re-reading status so a decision that
+		// lands between the read and the select still wakes this poll.
+		ch := s.waiterChan(ap.ID)
+		ap, err = s.st.GetApproval(id)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "request not found"})
+			return
+		}
 		s.expireIfStale(ap)
 		if ap.Status != "pending" {
 			resp := map[string]any{"status": ap.Status, "request_id": ap.ID}
@@ -1067,7 +1075,6 @@ func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *s
 			writeJSON(w, http.StatusOK, map[string]any{"status": "pending", "request_id": ap.ID})
 			return
 		}
-		ch := s.waiterChan(ap.ID)
 		timer := time.NewTimer(time.Until(deadline))
 		select {
 		case <-ch:
@@ -1077,11 +1084,6 @@ func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *s
 			return
 		}
 		timer.Stop()
-		ap, err = s.st.GetApproval(id)
-		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "request not found"})
-			return
-		}
 	}
 }
 

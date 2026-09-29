@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1229,5 +1230,35 @@ func TestOwnerAuthToken(t *testing.T) {
 	code, _ = doJSON(t, srv, "GET", "/v1/owner/audit", own, nil)
 	if code != 200 {
 		t.Fatalf("owner audit alias: %d", code)
+	}
+}
+
+func TestConcurrentPollersAllWake(t *testing.T) {
+	srv, st, dek, tok, own := approvalServer(t, "card")
+	h := addCard(t, st, srv, dek, "amex")
+	_, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": h})
+	rid := out["request_id"].(string)
+	var wg sync.WaitGroup
+	res := make([]map[string]any, 3)
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, o := doJSON(t, srv, "GET", "/v1/grants/requests/"+rid+"?wait=10", tok, nil)
+			res[i] = o
+		}(i)
+	}
+	// Give all three pollers a moment to register before deciding.
+	time.Sleep(50 * time.Millisecond)
+	start := time.Now()
+	doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, nil)
+	wg.Wait()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("pollers took %v", elapsed)
+	}
+	for i, o := range res {
+		if o["status"] != "approved" || o["token"] == nil {
+			t.Fatalf("poller %d bad response: %v", i, o)
+		}
 	}
 }
