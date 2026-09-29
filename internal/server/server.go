@@ -476,6 +476,16 @@ func (s *Server) waiterChan(id string) chan struct{} {
 	return ch
 }
 
+// dropWaiter removes ch from the waiter map if it is still the registered
+// channel, so finished polls don't leak entries.
+func (s *Server) dropWaiter(id string, ch chan struct{}) {
+	s.waitersMu.Lock()
+	defer s.waitersMu.Unlock()
+	if s.waiters[id] == ch {
+		delete(s.waiters, id)
+	}
+}
+
 // notifyWebhook best-effort POSTs the pending request to VALET_APPROVAL_WEBHOOK.
 func (s *Server) notifyWebhook(a *store.Approval, agentName, label, policyJSON string) {
 	if s.approvalNotify == "" {
@@ -1020,10 +1030,21 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 
 // expireIfStale lazily marks a pending approval past its TTL as expired.
 func (s *Server) expireIfStale(ap *store.Approval) {
-	if ap.Status == "pending" && time.Now().After(ap.ExpiresAt) {
-		if err := s.st.DecideApproval(ap.ID, "expired", "", nil); err == nil || errors.Is(err, store.ErrNotFound) {
-			ap.Status = "expired"
-			s.signalWaiters(ap.ID)
+	if ap.Status != "pending" || !time.Now().After(ap.ExpiresAt) {
+		return
+	}
+	err := s.st.DecideApproval(ap.ID, "expired", "", nil)
+	if err == nil {
+		ap.Status = "expired"
+		s.signalWaiters(ap.ID)
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		// Someone decided it concurrently — reflect the real outcome.
+		if fresh, ferr := s.st.GetApproval(ap.ID); ferr == nil {
+			ap.Status = fresh.Status
+			ap.GrantID = fresh.GrantID
+			ap.TokenCT = fresh.TokenCT
 		}
 	}
 }
@@ -1047,7 +1068,12 @@ func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *s
 	for {
 		// Register the waiter before re-reading status so a decision that
 		// lands between the read and the select still wakes this poll.
-		ch := s.waiterChan(ap.ID)
+		// wait=0 polls never block, so they skip registration entirely.
+		var ch chan struct{}
+		if waitSec > 0 {
+			ch = s.waiterChan(ap.ID)
+			defer s.dropWaiter(id, ch)
+		}
 		ap, err = s.st.GetApproval(id)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "request not found"})
@@ -1247,7 +1273,13 @@ func (s *Server) ownerGrants(w http.ResponseWriter, r *http.Request) {
 		if c, err := s.st.GetCredential(g.Handle); err == nil && c.Label != "" {
 			v.Label = c.Label
 		}
-		v.Active = v.RevokedAt == nil && time.Now().Before(g.ExpiresAt) && (g.MaxUses == 0 || g.Uses < g.MaxUses)
+		var p policy.Policy
+		json.Unmarshal([]byte(g.Policy), &p)
+		effectiveMax := g.MaxUses
+		if effectiveMax == 0 {
+			effectiveMax = p.MaxUses
+		}
+		v.Active = v.RevokedAt == nil && time.Now().Before(g.ExpiresAt) && (effectiveMax == 0 || g.Uses < effectiveMax)
 		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"grants": out})

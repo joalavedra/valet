@@ -30,17 +30,30 @@ func OpenSQLite(path string) (*SQLite, error) {
 		if i+1 <= version {
 			continue
 		}
-		if _, err := db.Exec(m); err != nil {
+		tx, err := db.Begin()
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migration %d: %w", i+1, err)
+		}
+		// A failed migration rolls back together with its version stamp so
+		// a partial application is never recorded as complete.
+		if _, err := tx.Exec(m); err != nil {
 			// A DB written by a build that ran migrations without
 			// version tracking may already carry an ALTERed column.
 			if !strings.Contains(err.Error(), "duplicate column name") {
+				tx.Rollback()
 				db.Close()
 				return nil, fmt.Errorf("migration %d: %w", i+1, err)
 			}
 		}
-		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
+			tx.Rollback()
 			db.Close()
 			return nil, fmt.Errorf("user_version: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migration %d: %w", i+1, err)
 		}
 	}
 	return &SQLite{db: db}, nil
