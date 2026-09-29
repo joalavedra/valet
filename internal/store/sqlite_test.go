@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -168,5 +169,93 @@ func TestGrantRevocation(t *testing.T) {
 	ag, err := s.GetAgent(a.ID)
 	if err != nil || ag.Name != "bot" {
 		t.Fatal(err, ag)
+	}
+}
+
+func TestMigrationsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s2, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("second open: %v", err)
+	}
+	defer s2.Close()
+	var version int
+	if err := s2.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != len(migrations) {
+		t.Fatalf("user_version = %d, want %d", version, len(migrations))
+	}
+}
+
+func TestMigrationUpgradesPreV3DB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(capturesSQL); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	// user_version is still 0, as a DB created before migration tracking.
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("open legacy: %v", err)
+	}
+	defer s.Close()
+	a, err := s.CreateAgent("bot", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &Grant{ID: "g1", AgentID: a.ID, Handle: "cred://x/y", Policy: "{}", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := s.AddGrant(g); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeGrant("g1"); err != nil {
+		t.Fatalf("revoked_at column missing: %v", err)
+	}
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != len(migrations) {
+		t.Fatalf("user_version = %d, want %d", version, len(migrations))
+	}
+}
+
+func TestMigrationToleratesPreAppliedV3(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "buggy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a DB written by the buggy build: every migration ran,
+	// user_version stayed 0.
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("open buggy-written db: %v", err)
+	}
+	defer s.Close()
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != len(migrations) {
+		t.Fatalf("user_version = %d, want %d", version, len(migrations))
 	}
 }

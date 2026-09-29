@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -20,10 +21,26 @@ func OpenSQLite(path string) (*SQLite, error) {
 	if err != nil {
 		return nil, err
 	}
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("user_version: %w", err)
+	}
 	for i, m := range migrations {
+		if i+1 <= version {
+			continue
+		}
 		if _, err := db.Exec(m); err != nil {
+			// A DB written by a build that ran migrations without
+			// version tracking may already carry an ALTERed column.
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				db.Close()
+				return nil, fmt.Errorf("migration %d: %w", i+1, err)
+			}
+		}
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
 			db.Close()
-			return nil, fmt.Errorf("migration %d: %w", i+1, err)
+			return nil, fmt.Errorf("user_version: %w", err)
 		}
 	}
 	return &SQLite{db: db}, nil
