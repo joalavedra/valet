@@ -53,7 +53,7 @@ func TestRequestGrant(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"grant_id": "g1", "token": "g1.sig"})
 	})
-	out, err := b.RequestGrant(context.Background(), "cred://x/y", `{"hosts":["x.com"]}`, "30m")
+	out, err := b.RequestGrant(context.Background(), "cred://x/y", `{"hosts":["x.com"]}`, "30m", "coffee", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,10 @@ type stubBackend struct{}
 func (stubBackend) ListHandles(ctx context.Context) (any, error) {
 	return map[string]any{"handles": []any{map[string]any{"handle": "cred://x/y"}}}, nil
 }
-func (stubBackend) RequestGrant(ctx context.Context, handle, policyJSON, ttl string) (any, error) {
+func (stubBackend) RequestGrant(ctx context.Context, handle, policyJSON, ttl, purpose string, wait time.Duration) (any, error) {
+	return nil, nil
+}
+func (stubBackend) WaitGrant(ctx context.Context, requestID string, wait time.Duration) (any, error) {
 	return nil, nil
 }
 func (stubBackend) BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit, pageURL string) (any, error) {
@@ -245,5 +248,68 @@ func TestRunHTTPNonLoopbackNoToken(t *testing.T) {
 	if err := RunHTTP(context.Background(), stubBackend{}, "0.0.0.0:1", ""); err == nil ||
 		!strings.Contains(err.Error(), "VALET_MCP_TOKEN") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRequestGrantPendingWaits(t *testing.T) {
+	var polls int
+	b := newBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/grants":
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["purpose"] != "coffee" {
+				t.Errorf("purpose not forwarded: %v", body)
+			}
+			w.WriteHeader(202)
+			json.NewEncoder(w).Encode(map[string]any{"status": "pending_approval", "request_id": "req9"})
+		case r.Method == "GET" && r.URL.Path == "/v1/grants/requests/req9":
+			polls++
+			if r.URL.Query().Get("wait") != "5" {
+				t.Errorf("wait param: %v", r.URL.Query())
+			}
+			json.NewEncoder(w).Encode(map[string]any{"status": "approved", "request_id": "req9", "grant_id": "g1", "token": "g1.sig"})
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	out, err := b.RequestGrant(context.Background(), "card://amex", "", "5m", "coffee", 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	if m["status"] != "approved" || m["token"] != "g1.sig" {
+		t.Fatalf("bad out %v", m)
+	}
+	if polls != 1 {
+		t.Fatalf("want 1 poll, got %d", polls)
+	}
+}
+
+func TestRequestGrantPendingNoWait(t *testing.T) {
+	b := newBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(202)
+		json.NewEncoder(w).Encode(map[string]any{"status": "pending_approval", "request_id": "req9"})
+	})
+	out, err := b.RequestGrant(context.Background(), "card://amex", "", "", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	if m["request_id"] != "req9" || !strings.Contains(m["hint"].(string), "wait_grant") {
+		t.Fatalf("bad pending out %v", m)
+	}
+}
+
+func TestWaitGrant(t *testing.T) {
+	b := newBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/grants/requests/req9" || r.URL.Query().Get("wait") != "10" {
+			t.Errorf("bad request %s %v", r.URL.Path, r.URL.Query())
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": "pending", "request_id": "req9"})
+	})
+	out, err := b.WaitGrant(context.Background(), "req9", 10*time.Second)
+	if err != nil || out.(map[string]any)["status"] != "pending" {
+		t.Fatal(err, out)
 	}
 }
