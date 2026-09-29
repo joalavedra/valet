@@ -20,6 +20,7 @@ var (
 	ErrInvalid   = errors.New("grant: invalid token")
 	ErrExpired   = errors.New("grant: expired")
 	ErrExhausted = errors.New("grant: use limit reached")
+	ErrRevoked   = errors.New("grant: revoked")
 )
 
 // Issuer signs and verifies grant tokens.
@@ -75,6 +76,9 @@ func (i *Issuer) Verify(token string, agentID int64) (*store.Grant, error) {
 	want := i.mac(agentID, id, g.Handle, g.ExpiresAt)
 	if !hmac.Equal([]byte(sig), []byte(want)) {
 		return nil, ErrInvalid
+	}
+	if g.RevokedAt != nil {
+		return nil, ErrRevoked
 	}
 	if time.Now().After(g.ExpiresAt) {
 		return nil, ErrExpired
