@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -20,10 +21,26 @@ func OpenSQLite(path string) (*SQLite, error) {
 	if err != nil {
 		return nil, err
 	}
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("user_version: %w", err)
+	}
 	for i, m := range migrations {
+		if i+1 <= version {
+			continue
+		}
 		if _, err := db.Exec(m); err != nil {
+			// A DB written by a build that ran migrations without
+			// version tracking may already carry an ALTERed column.
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				db.Close()
+				return nil, fmt.Errorf("migration %d: %w", i+1, err)
+			}
+		}
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
 			db.Close()
-			return nil, fmt.Errorf("migration %d: %w", i+1, err)
+			return nil, fmt.Errorf("user_version: %w", err)
 		}
 	}
 	return &SQLite{db: db}, nil
@@ -89,6 +106,16 @@ func (s *SQLite) GetAgentByTokenHash(h string) (*Agent, error) {
 	return a, err
 }
 
+func (s *SQLite) GetAgent(id int64) (*Agent, error) {
+	a := &Agent{}
+	err := s.db.QueryRow(`SELECT id, name, token_hash, created_at FROM agents WHERE id = ?`, id).
+		Scan(&a.ID, &a.Name, &a.TokenHash, &a.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return a, err
+}
+
 func (s *SQLite) AddGrant(g *Grant) error {
 	_, err := s.db.Exec(
 		`INSERT INTO grants (id, agent_id, handle, policy_json, expires_at, max_uses) VALUES (?,?,?,?,?,?)`,
@@ -96,20 +123,142 @@ func (s *SQLite) AddGrant(g *Grant) error {
 	return err
 }
 
-func (s *SQLite) GetGrant(id string) (*Grant, error) {
+func (s *SQLite) scanGrant(row interface{ Scan(...any) error }) (*Grant, error) {
 	g := &Grant{}
-	err := s.db.QueryRow(
-		`SELECT id, agent_id, handle, policy_json, expires_at, max_uses, uses, created_at FROM grants WHERE id = ?`, id).
-		Scan(&g.ID, &g.AgentID, &g.Handle, &g.Policy, &g.ExpiresAt, &g.MaxUses, &g.Uses, &g.CreatedAt)
+	var revokedAt sql.NullTime
+	err := row.Scan(&g.ID, &g.AgentID, &g.Handle, &g.Policy, &g.ExpiresAt, &g.MaxUses, &g.Uses, &revokedAt, &g.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return g, err
+	if err != nil {
+		return nil, err
+	}
+	if revokedAt.Valid {
+		g.RevokedAt = &revokedAt.Time
+	}
+	return g, nil
+}
+
+func (s *SQLite) GetGrant(id string) (*Grant, error) {
+	return s.scanGrant(s.db.QueryRow(
+		`SELECT id, agent_id, handle, policy_json, expires_at, max_uses, uses, revoked_at, created_at FROM grants WHERE id = ?`, id))
+}
+
+func (s *SQLite) ListGrants() ([]Grant, error) {
+	rows, err := s.db.Query(
+		`SELECT id, agent_id, handle, policy_json, expires_at, max_uses, uses, revoked_at, created_at FROM grants ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Grant
+	for rows.Next() {
+		g, err := s.scanGrant(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *g)
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLite) IncrementGrantUses(id string) error {
 	_, err := s.db.Exec(`UPDATE grants SET uses = uses + 1 WHERE id = ?`, id)
 	return err
+}
+
+// RevokeGrant marks a grant revoked once; a second revoke (or unknown id)
+// reports ErrNotFound.
+func (s *SQLite) RevokeGrant(id string) error {
+	res, err := s.db.Exec(`UPDATE grants SET revoked_at=CURRENT_TIMESTAMP WHERE id = ? AND revoked_at IS NULL`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLite) CreateApproval(a *Approval) error {
+	_, err := s.db.Exec(
+		`INSERT INTO approvals (id, agent_id, handle, purpose, policy_json, ttl_seconds, max_uses, status, expires_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.AgentID, a.Handle, a.Purpose, a.Policy, int64(a.TTL/time.Second), a.MaxUses, a.Status, a.ExpiresAt.UTC())
+	return err
+}
+
+func (s *SQLite) scanApproval(row interface{ Scan(...any) error }) (*Approval, error) {
+	a := &Approval{}
+	var grantID sql.NullString
+	var tokenCT []byte
+	var decidedAt, createdAt sql.NullTime
+	var ttl int64
+	err := row.Scan(&a.ID, &a.AgentID, &a.Handle, &a.Purpose, &a.Policy, &ttl, &a.MaxUses,
+		&a.Status, &grantID, &tokenCT, &a.ExpiresAt, &decidedAt, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.TTL = time.Duration(ttl) * time.Second
+	a.GrantID = grantID.String
+	a.TokenCT = tokenCT
+	if decidedAt.Valid {
+		a.DecidedAt = &decidedAt.Time
+	}
+	if createdAt.Valid {
+		a.CreatedAt = createdAt.Time
+	}
+	return a, nil
+}
+
+const approvalCols = `id, agent_id, handle, purpose, policy_json, ttl_seconds, max_uses, status, grant_id, token_ct, expires_at, decided_at, created_at`
+
+func (s *SQLite) GetApproval(id string) (*Approval, error) {
+	return s.scanApproval(s.db.QueryRow(
+		`SELECT `+approvalCols+` FROM approvals WHERE id = ?`, id))
+}
+
+// ListApprovals returns approvals newest first; empty status lists all.
+func (s *SQLite) ListApprovals(status string) ([]Approval, error) {
+	var rows *sql.Rows
+	var err error
+	if status == "" {
+		rows, err = s.db.Query(`SELECT ` + approvalCols + ` FROM approvals ORDER BY created_at DESC`)
+	} else {
+		rows, err = s.db.Query(`SELECT `+approvalCols+` FROM approvals WHERE status = ? ORDER BY created_at DESC`, status)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Approval
+	for rows.Next() {
+		a, err := s.scanApproval(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *a)
+	}
+	return out, rows.Err()
+}
+
+// DecideApproval atomically moves a pending approval to status; a second
+// decision (or unknown id) reports ErrNotFound.
+func (s *SQLite) DecideApproval(id, status, grantID string, tokenCT []byte) error {
+	res, err := s.db.Exec(
+		`UPDATE approvals SET status=?, grant_id=?, token_ct=?, decided_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'`,
+		status, grantID, tokenCT, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *SQLite) CreateCapture(c *Capture) error {

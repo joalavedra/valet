@@ -1,6 +1,7 @@
 package grant
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -63,5 +64,23 @@ func TestExpiry(t *testing.T) {
 	tok, _, _ := i.Issue(a.ID, "cred://x/y", "{}", -time.Hour, 0)
 	if _, err := i.Verify(tok, a.ID); err != ErrExpired {
 		t.Fatalf("want ErrExpired, got %v", err)
+	}
+}
+
+func TestRevokedGrantFailsVerify(t *testing.T) {
+	i, a := tempIssuer(t)
+	tok, g, err := i.Issue(a.ID, "cred://x/y", "{}", time.Hour, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := i.Verify(tok, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	st := i.st
+	if err := st.RevokeGrant(g.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := i.Verify(tok, a.ID); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("want ErrRevoked, got %v", err)
 	}
 }

@@ -21,7 +21,8 @@ import (
 // Backend is the control-plane surface the tools call through.
 type Backend interface {
 	ListHandles(ctx context.Context) (any, error)
-	RequestGrant(ctx context.Context, handle string, policyJSON string, ttl string) (any, error)
+	RequestGrant(ctx context.Context, handle string, policyJSON string, ttl string, purpose string, wait time.Duration) (any, error)
+	WaitGrant(ctx context.Context, requestID string, wait time.Duration) (any, error)
 	BrowserFill(ctx context.Context, grant, cdpWSURL string, mapping map[string]string, submit string, pageURL string) (any, error)
 	HTTPCall(ctx context.Context, grant, method, url, headersJSON, body string) (any, error)
 	Pay(ctx context.Context, grant, url, method string, headers map[string]string, body string, amount int64, currency string) (any, error)
@@ -97,14 +98,16 @@ func (b *HTTPBackend) ListHandles(ctx context.Context) (any, error) {
 }
 
 // RequestGrant requests a grant for handle under the given JSON policy.
-func (b *HTTPBackend) RequestGrant(ctx context.Context, handle, policyJSON, ttl string) (any, error) {
+// When the server requires human approval it returns 202; with wait>0 we
+// follow up with one long-poll for the decision.
+func (b *HTTPBackend) RequestGrant(ctx context.Context, handle, policyJSON, ttl, purpose string, wait time.Duration) (any, error) {
 	var pol any
 	if policyJSON != "" {
 		if err := json.Unmarshal([]byte(policyJSON), &pol); err != nil {
 			return nil, fmt.Errorf("invalid policy json: %w", err)
 		}
 	}
-	var out any
+	var out map[string]any
 	body := map[string]any{"handle": handle, "policy": pol}
 	if ttl != "" {
 		d, err := time.ParseDuration(ttl)
@@ -113,7 +116,39 @@ func (b *HTTPBackend) RequestGrant(ctx context.Context, handle, policyJSON, ttl 
 		}
 		body["ttl"] = int64(d / time.Second)
 	}
-	err := b.call(ctx, "POST", "/v1/grants", body, &out)
+	if purpose != "" {
+		body["purpose"] = purpose
+	}
+	if err := b.call(ctx, "POST", "/v1/grants", body, &out); err != nil {
+		return nil, err
+	}
+	if out["status"] != "pending_approval" {
+		return out, nil
+	}
+	requestID, _ := out["request_id"].(string)
+	if wait <= 0 || requestID == "" {
+		out["hint"] = "waiting for human approval; call wait_grant with request_id"
+		return out, nil
+	}
+	waited, err := b.WaitGrant(ctx, requestID, wait)
+	if err != nil {
+		return nil, err
+	}
+	if m, ok := waited.(map[string]any); ok && m["status"] == "pending" {
+		m["request_id"] = requestID
+		m["hint"] = "waiting for human approval; call wait_grant with request_id"
+	}
+	return waited, nil
+}
+
+// WaitGrant long-polls the status of a pending approval request.
+func (b *HTTPBackend) WaitGrant(ctx context.Context, requestID string, wait time.Duration) (any, error) {
+	var out any
+	path := "/v1/grants/requests/" + requestID
+	if wait > 0 {
+		path += fmt.Sprintf("?wait=%d", int64(wait/time.Second))
+	}
+	err := b.call(ctx, "GET", path, nil, &out)
 	return out, err
 }
 
@@ -165,9 +200,33 @@ func (b *HTTPBackend) Pay(ctx context.Context, grant, url, method string, header
 type listHandlesArgs struct{}
 
 type requestGrantArgs struct {
-	Handle string `json:"handle" jsonschema:"handle URI, e.g. cred://github.com/joan"`
-	Policy string `json:"policy" jsonschema:"JSON policy object"`
-	TTL    string `json:"ttl,omitempty" jsonschema:"duration such as 30m or 2h"`
+	Handle  string `json:"handle" jsonschema:"handle URI, e.g. cred://github.com/joan"`
+	Policy  string `json:"policy" jsonschema:"JSON policy object"`
+	TTL     string `json:"ttl,omitempty" jsonschema:"duration such as 30m or 2h"`
+	Purpose string `json:"purpose,omitempty" jsonschema:"one-line human-readable reason shown to the user on the approval screen, e.g. 'Coffee at Starbucks'"`
+	Wait    string `json:"wait,omitempty" jsonschema:"how long to wait for human approval, e.g. 90s (default 90s, max 120s)"`
+}
+
+type waitGrantArgs struct {
+	RequestID string `json:"request_id" jsonschema:"pending approval request id returned by request_grant"`
+	Wait      string `json:"wait,omitempty" jsonschema:"how long to wait for human approval, e.g. 90s (max 120s)"`
+}
+
+func parseWait(s string, def time.Duration) (time.Duration, error) {
+	if s == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid wait: %w", err)
+	}
+	if d > 120*time.Second {
+		d = 120 * time.Second
+	}
+	if d < 0 {
+		d = 0
+	}
+	return d, nil
 }
 
 type httpCallArgs struct {
@@ -211,9 +270,21 @@ func New(b Backend) *mcp.Server {
 		func(ctx context.Context, req *mcp.CallToolRequest, args listHandlesArgs) (*mcp.CallToolResult, any, error) {
 			return result(b.ListHandles(ctx))
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "request_grant", Description: "Request a grant to use a handle under a policy."},
+	mcp.AddTool(s, &mcp.Tool{Name: "request_grant", Description: "Request a grant to use a handle under a policy. Card handles typically require the user's approval; the call blocks up to `wait` for a decision, otherwise returns a request_id to pass to wait_grant."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args requestGrantArgs) (*mcp.CallToolResult, any, error) {
-			return result(b.RequestGrant(ctx, args.Handle, args.Policy, args.TTL))
+			wait, err := parseWait(args.Wait, 90*time.Second)
+			if err != nil {
+				return result(nil, err)
+			}
+			return result(b.RequestGrant(ctx, args.Handle, args.Policy, args.TTL, args.Purpose, wait))
+		})
+	mcp.AddTool(s, &mcp.Tool{Name: "wait_grant", Description: "Wait for the user's decision on a pending grant request (from request_grant's request_id). Blocks up to `wait` seconds."},
+		func(ctx context.Context, req *mcp.CallToolRequest, args waitGrantArgs) (*mcp.CallToolResult, any, error) {
+			wait, err := parseWait(args.Wait, 90*time.Second)
+			if err != nil {
+				return result(nil, err)
+			}
+			return result(b.WaitGrant(ctx, args.RequestID, wait))
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "http_call", Description: "Authenticated HTTP call via the egress edge (Infisical Agent Vault injects the credential; the agent never sees it)"},
 		func(ctx context.Context, req *mcp.CallToolRequest, args httpCallArgs) (*mcp.CallToolResult, any, error) {

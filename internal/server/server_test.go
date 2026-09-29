@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
 	"github.com/joalavedra/valet/internal/grant"
+	"github.com/joalavedra/valet/internal/handle"
 	"github.com/joalavedra/valet/internal/store"
 )
 
@@ -961,5 +964,301 @@ func TestCaptureCompleteRejectsExpired(t *testing.T) {
 	})
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "card://visa-old") {
 		t.Fatalf("current month: got %d %s", rec.Code, rec.Body)
+	}
+}
+
+// addCard stores a card credential and returns its handle.
+func addCard(t *testing.T, st *store.SQLite, srv *Server, dek []byte, label string) string {
+	t.Helper()
+	h, err := handle.New("card", "", label)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt, _ := json.Marshal(map[string]string{"number": "tok_123", "cvc": "123"})
+	ct, _ := crypto.Encrypt(dek, pt)
+	if err := st.AddCredential(&store.Credential{Handle: h.String(), Type: "card", Label: label, Metadata: `{"provider":"vgs"}`, Ciphertext: ct}); err != nil {
+		t.Fatal(err)
+	}
+	return h.String()
+}
+
+// approvalServer builds a server with the given approval mode and a card
+// credential; returns srv, store, dek, agent token, owner token.
+func approvalServer(t *testing.T, mode string) (*Server, *store.SQLite, []byte, string, string) {
+	t.Helper()
+	t.Setenv("VALET_REQUIRE_APPROVAL", mode)
+	t.Setenv("VALET_OWNER_TOKEN", "owner-tok")
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	dek, _ := crypto.GenerateDEK()
+	srv := New(st, grant.NewIssuer(st, dek), audit.New(st), &fakeFiller{pageURL: "https://github.com/login"}, dek, nil)
+	token := "tok-abc"
+	if _, err := st.CreateAgent("bot", hashToken(token)); err != nil {
+		t.Fatal(err)
+	}
+	return srv, st, dek, token, "owner-tok"
+}
+
+func doJSON(t *testing.T, srv *Server, method, path, tok string, body any) (int, map[string]any) {
+	t.Helper()
+	var rdr io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rdr = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	out := map[string]any{}
+	json.NewDecoder(rec.Body).Decode(&out)
+	return rec.Code, out
+}
+
+func TestCardGrantRequiresApproval(t *testing.T) {
+	srv, st, dek, tok, own := approvalServer(t, "card")
+	h := addCard(t, st, srv, dek, "amex")
+	code, out := doJSON(t, srv, "POST", "/v1/grants", tok,
+		map[string]any{"handle": h, "purpose": "coffee", "ttl": 600})
+	if code != 202 || out["status"] != "pending_approval" {
+		t.Fatalf("want 202 pending, got %d %v", code, out)
+	}
+	rid, _ := out["request_id"].(string)
+	if rid == "" || out["approve_url"] != "/approve/"+rid {
+		t.Fatalf("bad 202 body: %v", out)
+	}
+	// Agent poll: still pending.
+	code, out = doJSON(t, srv, "GET", "/v1/grants/requests/"+rid, tok, nil)
+	if code != 200 || out["status"] != "pending" {
+		t.Fatalf("want pending, got %d %v", code, out)
+	}
+	// Owner sees it listed.
+	code, out = doJSON(t, srv, "GET", "/v1/owner/approvals?status=pending", own, nil)
+	if code != 200 {
+		t.Fatalf("owner list: %d %v", code, out)
+	}
+	list := out["approvals"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("want 1 approval, got %v", out)
+	}
+	a0 := list[0].(map[string]any)
+	if a0["purpose"] != "coffee" || a0["agent"] != "bot" || a0["type"] != "card" || a0["label"] != "amex" {
+		t.Fatalf("bad approval view: %v", a0)
+	}
+	// Approve.
+	code, out = doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, nil)
+	if code != 200 || out["status"] != "approved" || out["grant_id"] == nil {
+		t.Fatalf("approve: %d %v", code, out)
+	}
+	// Agent poll now returns a usable token.
+	code, out = doJSON(t, srv, "GET", "/v1/grants/requests/"+rid, tok, nil)
+	if code != 200 || out["status"] != "approved" {
+		t.Fatalf("want approved, got %d %v", code, out)
+	}
+	gtoken, _ := out["token"].(string)
+	if _, err := srv.issuer.Verify(gtoken, 1); err != nil {
+		t.Fatalf("issued token doesn't verify: %v", err)
+	}
+	// Approve twice → 409.
+	code, _ = doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, nil)
+	if code != 409 {
+		t.Fatalf("second approve: want 409, got %d", code)
+	}
+	// Grant shows in owner grant list as active.
+	code, out = doJSON(t, srv, "GET", "/v1/owner/grants", own, nil)
+	glist := out["grants"].([]any)
+	if len(glist) != 1 || glist[0].(map[string]any)["active"] != true {
+		t.Fatalf("bad grants list: %v", glist)
+	}
+	gid := glist[0].(map[string]any)["id"].(string)
+	// Revoke → token stops verifying, edge returns 403.
+	code, _ = doJSON(t, srv, "POST", "/v1/owner/grants/"+gid+"/revoke", own, nil)
+	if code != 200 {
+		t.Fatalf("revoke: %d", code)
+	}
+	if _, err := srv.issuer.Verify(gtoken, 1); !errors.Is(err, grant.ErrRevoked) {
+		t.Fatalf("want ErrRevoked, got %v", err)
+	}
+	code, out = doJSON(t, srv, "POST", "/v1/edge/browser/fill", tok,
+		map[string]any{"grant_token": gtoken, "cdp_ws_url": "ws://127.0.0.1:9222", "mapping": map[string]string{"u": "#u"}})
+	if code != 403 || out["error"] != "grant revoked" {
+		t.Fatalf("fill on revoked: %d %v", code, out)
+	}
+	code, _ = doJSON(t, srv, "POST", "/v1/owner/grants/"+gid+"/revoke", own, nil)
+	if code != 404 {
+		t.Fatalf("re-revoke: want 404, got %d", code)
+	}
+}
+
+func TestDenyGrantRequest(t *testing.T) {
+	srv, st, dek, tok, own := approvalServer(t, "card")
+	h := addCard(t, st, srv, dek, "amex")
+	code, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": h})
+	if code != 202 {
+		t.Fatalf("want 202, got %d", code)
+	}
+	rid := out["request_id"].(string)
+	code, out = doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/deny", own, nil)
+	if code != 200 || out["status"] != "denied" {
+		t.Fatalf("deny: %d %v", code, out)
+	}
+	code, out = doJSON(t, srv, "GET", "/v1/grants/requests/"+rid, tok, nil)
+	if out["status"] != "denied" {
+		t.Fatalf("agent sees %v", out)
+	}
+}
+
+func TestApprovalLazyExpiry(t *testing.T) {
+	srv, st, dek, tok, own := approvalServer(t, "card")
+	h := addCard(t, st, srv, dek, "amex")
+	_, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": h})
+	rid := out["request_id"].(string)
+	// Insert a stale pending approval directly.
+	if err := st.CreateApproval(&store.Approval{ID: "stale1", AgentID: 1, Handle: h,
+		Policy: "{}", Status: "pending", ExpiresAt: time.Now().Add(-time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	code, out := doJSON(t, srv, "GET", "/v1/grants/requests/stale1", tok, nil)
+	if code != 200 || out["status"] != "expired" {
+		t.Fatalf("want expired, got %d %v", code, out)
+	}
+	// Stale request excluded from the pending owner list.
+	code, out = doJSON(t, srv, "GET", "/v1/owner/approvals?status=pending", own, nil)
+	list := out["approvals"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["id"] != rid {
+		t.Fatalf("bad pending list: %v", list)
+	}
+}
+
+func TestGrantRequestForeignAgent(t *testing.T) {
+	srv, st, dek, tok, _ := approvalServer(t, "card")
+	if _, err := st.CreateAgent("other", hashToken("tok-other")); err != nil {
+		t.Fatal(err)
+	}
+	h := addCard(t, st, srv, dek, "amex")
+	_, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": h})
+	rid := out["request_id"].(string)
+	code, _ := doJSON(t, srv, "GET", "/v1/grants/requests/"+rid, "tok-other", nil)
+	if code != 404 {
+		t.Fatalf("foreign agent: want 404, got %d", code)
+	}
+}
+
+func TestApprovalModesNoneAndAll(t *testing.T) {
+	srv, st, dek, tok, _ := approvalServer(t, "none")
+	h := addCard(t, st, srv, dek, "amex")
+	code, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": h})
+	if code != 200 || out["token"] == nil {
+		t.Fatalf("mode=none: want immediate grant, got %d %v", code, out)
+	}
+
+	srv, _, _, tok, _ = approvalServer(t, "all")
+	code, out = doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": "cred://github.com/joan"})
+	if code != 404 && code != 202 {
+		t.Fatalf("mode=all: want 202 for login handle (missing cred ok to check separately), got %d", code)
+	}
+}
+
+func TestApprovalModeAllLogin(t *testing.T) {
+	srv, st, dek, tok, _ := approvalServer(t, "all")
+	pt, _ := json.Marshal(map[string]string{"username": "u", "password": "p"})
+	ct, _ := crypto.Encrypt(dek, pt)
+	if err := st.AddCredential(&store.Credential{Handle: "cred://github.com/joan", Type: "login", Site: "github.com", Label: "joan", Metadata: "{}", Ciphertext: ct}); err != nil {
+		t.Fatal(err)
+	}
+	code, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": "cred://github.com/joan"})
+	if code != 202 || out["status"] != "pending_approval" {
+		t.Fatalf("mode=all: want pending for login handle, got %d %v", code, out)
+	}
+}
+
+func TestRequireHumanPolicyForcesApproval(t *testing.T) {
+	srv, st, dek, tok, _ := approvalServer(t, "none")
+	pt, _ := json.Marshal(map[string]string{"username": "u"})
+	ct, _ := crypto.Encrypt(dek, pt)
+	if err := st.AddCredential(&store.Credential{Handle: "cred://github.com/joan", Type: "login", Site: "github.com", Label: "joan", Metadata: "{}", Ciphertext: ct}); err != nil {
+		t.Fatal(err)
+	}
+	code, out := doJSON(t, srv, "POST", "/v1/grants", tok,
+		map[string]any{"handle": "cred://github.com/joan", "policy": map[string]any{"require_human": true}})
+	if code != 202 {
+		t.Fatalf("require_human: want 202, got %d %v", code, out)
+	}
+}
+
+func TestLongPollWakesOnApprove(t *testing.T) {
+	srv, st, dek, tok, own := approvalServer(t, "card")
+	h := addCard(t, st, srv, dek, "amex")
+	_, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": h})
+	rid := out["request_id"].(string)
+	done := make(chan map[string]any, 1)
+	go func() {
+		_, o := doJSON(t, srv, "GET", "/v1/grants/requests/"+rid+"?wait=60", tok, nil)
+		done <- o
+	}()
+	time.Sleep(100 * time.Millisecond)
+	start := time.Now()
+	doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, nil)
+	select {
+	case o := <-done:
+		if o["status"] != "approved" || o["token"] == nil {
+			t.Fatalf("bad wake response: %v", o)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("long poll did not return promptly")
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("long poll took too long: %v", time.Since(start))
+	}
+}
+
+func TestOwnerAuthToken(t *testing.T) {
+	srv, _, _, _, own := approvalServer(t, "card")
+	code, _ := doJSON(t, srv, "GET", "/v1/owner/handles", own, nil)
+	if code != 200 {
+		t.Fatalf("owner token auth: %d", code)
+	}
+	code, _ = doJSON(t, srv, "GET", "/v1/owner/handles", "wrong", nil)
+	if code != 401 {
+		t.Fatalf("bad owner token: want 401, got %d", code)
+	}
+	code, _ = doJSON(t, srv, "GET", "/v1/owner/audit", own, nil)
+	if code != 200 {
+		t.Fatalf("owner audit alias: %d", code)
+	}
+}
+
+func TestConcurrentPollersAllWake(t *testing.T) {
+	srv, st, dek, tok, own := approvalServer(t, "card")
+	h := addCard(t, st, srv, dek, "amex")
+	_, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": h})
+	rid := out["request_id"].(string)
+	var wg sync.WaitGroup
+	res := make([]map[string]any, 3)
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, o := doJSON(t, srv, "GET", "/v1/grants/requests/"+rid+"?wait=10", tok, nil)
+			res[i] = o
+		}(i)
+	}
+	// Give all three pollers a moment to register before deciding.
+	time.Sleep(50 * time.Millisecond)
+	start := time.Now()
+	doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, nil)
+	wg.Wait()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("pollers took %v", elapsed)
+	}
+	for i, o := range res {
+		if o["status"] != "approved" || o["token"] == nil {
+			t.Fatalf("poller %d bad response: %v", i, o)
+		}
 	}
 }

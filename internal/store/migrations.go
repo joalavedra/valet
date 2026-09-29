@@ -8,4 +8,7 @@ var initSQL string
 //go:embed migrations/002_captures.sql
 var capturesSQL string
 
-var migrations = []string{initSQL, capturesSQL}
+//go:embed migrations/003_approvals.sql
+var approvalsSQL string
+
+var migrations = []string{initSQL, capturesSQL, approvalsSQL}

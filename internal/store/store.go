@@ -34,6 +34,25 @@ type Grant struct {
 	ExpiresAt time.Time
 	MaxUses   int
 	Uses      int
+	RevokedAt *time.Time
+	CreatedAt time.Time
+}
+
+// Approval is a pending human decision over a grant request. TokenCT holds
+// the issued grant token ciphertext once approved so the agent can claim it.
+type Approval struct {
+	ID        string
+	AgentID   int64
+	Handle    string
+	Purpose   string
+	Policy    string // JSON
+	TTL       time.Duration
+	MaxUses   int
+	Status    string // pending | approved | denied | expired
+	GrantID   string
+	TokenCT   []byte
+	ExpiresAt time.Time
+	DecidedAt *time.Time
 	CreatedAt time.Time
 }
 
@@ -71,10 +90,18 @@ type Store interface {
 
 	CreateAgent(name, tokenHash string) (*Agent, error)
 	GetAgentByTokenHash(h string) (*Agent, error)
+	GetAgent(id int64) (*Agent, error)
 
 	AddGrant(g *Grant) error
 	GetGrant(id string) (*Grant, error)
+	ListGrants() ([]Grant, error)
 	IncrementGrantUses(id string) error
+	RevokeGrant(id string) error
+
+	CreateApproval(a *Approval) error
+	GetApproval(id string) (*Approval, error)
+	ListApprovals(status string) ([]Approval, error)
+	DecideApproval(id, status, grantID string, tokenCT []byte) error
 
 	CreateCapture(c *Capture) error
 	GetCapture(token string) (*Capture, error)

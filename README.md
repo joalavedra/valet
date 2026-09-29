@@ -256,6 +256,39 @@ See [deploy/hotdesk](deploy/hotdesk) for a drop-in hotdesk desktop image that
 bundles Valet into `hotdesk-desktop` (supervisor-managed server, credentials
 encrypted in the persistent `/home/cua` volume, MCP via `docker exec`).
 
+## Human approvals & wallet
+
+Grant requests can require a human decision before a token is issued. An
+agent's `request_grant` returns `202 pending_approval` with a `request_id`;
+it then polls `GET /v1/grants/requests/<id>` (optionally `?wait=<seconds>`
+for a long poll) until the owner decides.
+
+Configuration (environment):
+
+| Variable | Meaning |
+|---|---|
+| `VALET_REQUIRE_APPROVAL` | `card` (default: any `card://` handle needs approval), `all`, or `none`. `policy.require_human` on a request always forces approval. |
+| `VALET_APPROVAL_TTL` | How long a pending request stays live (Go duration, default `10m`). |
+| `VALET_APPROVAL_WEBHOOK` | Optional URL POSTed a JSON notification (`request_id`, `agent`, `handle`, `label`, `purpose`, `policy`, `approve_url`) for each new request. |
+| `VALET_OWNER_TOKEN` | Extra bearer token accepted for owner endpoints (alongside `VALET_MASTER_PASSWORD`). |
+| `VALET_PUBLIC_URL` | Public base URL used to build `approve_url` links; relative when unset. |
+
+Pages: `GET /wallet` (all pending requests + active grants) and
+`GET /approve/<id>` serve the bundled `wallet.html` SPA.
+
+Owner API (bearer = master password or `VALET_OWNER_TOKEN`):
+
+- `GET /v1/owner/handles` — same handle list agents see
+- `GET /v1/owner/approvals?status=pending` — pending/decided requests
+- `POST /v1/owner/approvals/{id}/approve` — issue the grant
+- `POST /v1/owner/approvals/{id}/deny`
+- `GET /v1/owner/grants` — all grants with `active` flag
+- `POST /v1/owner/grants/{id}/revoke` — revoke (edge calls then get `403 grant revoked`)
+- `GET /v1/owner/audit` — alias of `GET /v1/audit`
+
+MCP: `request_grant` accepts `purpose` and `wait`; `wait_grant(request_id,
+wait)` long-polls for the decision.
+
 ## Dev
 
 ```bash
