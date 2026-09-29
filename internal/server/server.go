@@ -53,7 +53,14 @@ type Server struct {
 	approvalNotify string
 	ownerToken     string
 	waitersMu      sync.Mutex
-	waiters        map[string]chan struct{}
+	waiters        map[string]*waiter
+}
+
+// waiter is a shared notification channel for polls on the same request id;
+// refs counts registered pollers so a canceled one can't strand the rest.
+type waiter struct {
+	ch   chan struct{}
+	refs int
 }
 
 // New builds the API mux.
@@ -81,7 +88,7 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 		approvalMode: mode, approvalTTL: approvalTTL,
 		approvalNotify: os.Getenv("VALET_APPROVAL_WEBHOOK"),
 		ownerToken:     os.Getenv("VALET_OWNER_TOKEN"),
-		waiters:        map[string]chan struct{}{},
+		waiters:        map[string]*waiter{},
 	}
 	s.mux.HandleFunc("GET /healthz", s.healthz)
 	s.mux.HandleFunc("GET /v1/handles", s.agentAuth(s.handles))
@@ -458,30 +465,38 @@ func (s *Server) approvalRequired(credType string, p *policy.Policy) bool {
 func (s *Server) signalWaiters(id string) {
 	s.waitersMu.Lock()
 	defer s.waitersMu.Unlock()
-	if ch, ok := s.waiters[id]; ok {
+	if w, ok := s.waiters[id]; ok {
 		delete(s.waiters, id)
-		close(ch)
+		close(w.ch)
 	}
 }
 
-// waiterChan returns (or creates) the notification channel for id.
+// waiterChan registers a poller on id's shared channel (refcounted),
+// creating it when absent.
 func (s *Server) waiterChan(id string) chan struct{} {
 	s.waitersMu.Lock()
 	defer s.waitersMu.Unlock()
-	ch, ok := s.waiters[id]
+	w, ok := s.waiters[id]
 	if !ok {
-		ch = make(chan struct{})
-		s.waiters[id] = ch
+		w = &waiter{ch: make(chan struct{})}
+		s.waiters[id] = w
 	}
-	return ch
+	w.refs++
+	return w.ch
 }
 
-// dropWaiter removes ch from the waiter map if it is still the registered
-// channel, so finished polls don't leak entries.
+// dropWaiter releases one poll's reference; the entry is removed only when
+// no pollers remain on this channel, so finished polls can't strand
+// concurrent ones sharing it.
 func (s *Server) dropWaiter(id string, ch chan struct{}) {
 	s.waitersMu.Lock()
 	defer s.waitersMu.Unlock()
-	if s.waiters[id] == ch {
+	w, ok := s.waiters[id]
+	if !ok || w.ch != ch {
+		return
+	}
+	w.refs--
+	if w.refs <= 0 {
 		delete(s.waiters, id)
 	}
 }
@@ -1020,7 +1035,7 @@ func evalReason(reason string) string {
 }
 
 func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
-	entries, err := s.st.ListAudit(500)
+	entries, err := s.st.ListAuditRecent(500)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1072,10 +1087,15 @@ func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *s
 		var ch chan struct{}
 		if waitSec > 0 {
 			ch = s.waiterChan(ap.ID)
-			defer s.dropWaiter(id, ch)
+		}
+		release := func() {
+			if ch != nil {
+				s.dropWaiter(id, ch)
+			}
 		}
 		ap, err = s.st.GetApproval(id)
 		if err != nil {
+			release()
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "request not found"})
 			return
 		}
@@ -1094,10 +1114,12 @@ func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *s
 					resp["expires_at"] = g.ExpiresAt
 				}
 			}
+			release()
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 		if waitSec == 0 || !time.Now().Before(deadline) {
+			release()
 			writeJSON(w, http.StatusOK, map[string]any{"status": "pending", "request_id": ap.ID})
 			return
 		}
@@ -1107,9 +1129,11 @@ func (s *Server) grantRequestStatus(w http.ResponseWriter, r *http.Request, a *s
 		case <-timer.C:
 		case <-r.Context().Done():
 			timer.Stop()
+			release()
 			return
 		}
 		timer.Stop()
+		release()
 	}
 }
 
@@ -1276,7 +1300,7 @@ func (s *Server) ownerGrants(w http.ResponseWriter, r *http.Request) {
 		var p policy.Policy
 		json.Unmarshal([]byte(g.Policy), &p)
 		effectiveMax := g.MaxUses
-		if effectiveMax == 0 {
+		if effectiveMax == 0 || (p.MaxUses > 0 && p.MaxUses < effectiveMax) {
 			effectiveMax = p.MaxUses
 		}
 		v.Active = v.RevokedAt == nil && time.Now().Before(g.ExpiresAt) && (effectiveMax == 0 || g.Uses < effectiveMax)

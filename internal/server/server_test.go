@@ -1331,3 +1331,77 @@ func TestOwnerGrantsEffectiveMaxUses(t *testing.T) {
 		t.Fatalf("policy-exhausted grant should be inactive: %v", list)
 	}
 }
+
+func TestCanceledPollDoesNotStrandOthers(t *testing.T) {
+	srv, st, dek, tok, own := approvalServer(t, "card")
+	h := addCard(t, st, srv, dek, "amex")
+	_, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": h})
+	rid := out["request_id"].(string)
+
+	// Poll A: canceled request context mid-wait.
+	ctxA, cancelA := context.WithCancel(context.Background())
+	doneA := make(chan struct{})
+	go func() {
+		defer close(doneA)
+		req := httptest.NewRequest("GET", "/v1/grants/requests/"+rid+"?wait=60", nil).WithContext(ctxA)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		srv.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	// Poll B: survives, should wake on approve.
+	doneB := make(chan map[string]any, 1)
+	go func() {
+		defer close(doneB)
+		req := httptest.NewRequest("GET", "/v1/grants/requests/"+rid+"?wait=60", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		m := map[string]any{}
+		json.NewDecoder(rec.Body).Decode(&m)
+		doneB <- m
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancelA()
+	<-doneA
+	time.Sleep(20 * time.Millisecond)
+	start := time.Now()
+	doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, nil)
+	select {
+	case m := <-doneB:
+		if m["status"] != "approved" || m["token"] == nil {
+			t.Fatalf("poller B bad response: %v", m)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("poller B stranded by canceled poller A")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("poller B took %v", time.Since(start))
+	}
+	if len(srv.waiters) != 0 {
+		t.Fatalf("waiters leaked: %v", srv.waiters)
+	}
+}
+
+func TestOwnerGrantsEffectiveMaxUsesMin(t *testing.T) {
+	srv, st, dek, _, own := approvalServer(t, "none")
+	pt, _ := json.Marshal(map[string]string{"username": "u"})
+	ct, _ := crypto.Encrypt(dek, pt)
+	if err := st.AddCredential(&store.Credential{Handle: "cred://github.com/joan", Type: "login", Site: "github.com", Label: "joan", Metadata: "{}", Ciphertext: ct}); err != nil {
+		t.Fatal(err)
+	}
+	// Column says 5, policy says 1, uses 1 → policy wins → inactive.
+	_, g, err := srv.issuer.Issue(1, "cred://github.com/joan", `{"max_uses":1}`, time.Hour, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.IncrementGrantUses(g.ID); err != nil {
+		t.Fatal(err)
+	}
+	code, out := doJSON(t, srv, "GET", "/v1/owner/grants", own, nil)
+	if code != 200 {
+		t.Fatalf("owner grants: %d", code)
+	}
+	list := out["grants"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["active"] != false {
+		t.Fatalf("min(column=5,policy=1)=1 with uses=1 should be inactive: %v", list)
+	}
+}

@@ -351,6 +351,26 @@ func (s *SQLite) ListAudit(limit int) ([]AuditEntry, error) {
 	return out, rows.Err()
 }
 
+// ListAuditRecent returns the newest entries first; ListAudit stays
+// ascending for chain verification.
+func (s *SQLite) ListAuditRecent(limit int) ([]AuditEntry, error) {
+	rows, err := s.db.Query(
+		`SELECT id, ts, agent_id, handle, edge, target, decision, detail_json, prev_hash, hash FROM audit ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.TS, &e.AgentID, &e.Handle, &e.Edge, &e.Target, &e.Decision, &e.Detail, &e.PrevHash, &e.Hash); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 func (s *SQLite) Meta(key string) (string, error) {
 	var v string
 	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)

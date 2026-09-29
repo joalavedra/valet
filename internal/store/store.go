@@ -110,6 +110,7 @@ type Store interface {
 	AppendAudit(e *AuditEntry) error
 	LastAudit() (*AuditEntry, error)
 	ListAudit(limit int) ([]AuditEntry, error)
+	ListAuditRecent(limit int) ([]AuditEntry, error)
 
 	Meta(key string) (string, error)
 	SetMeta(key, value string) error
