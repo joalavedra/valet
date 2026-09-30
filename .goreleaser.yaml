@@ -60,6 +60,28 @@ dockers:
     extra_files:
       - Dockerfile.goreleaser
 
+# v2.18+: `brews` is deprecated → homebrew_casks with a binary stanza.
+homebrew_casks:
+  - name: valet
+    repository:
+      owner: joalavedra
+      name: homebrew-valet
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/joalavedra/valet
+    description: "Credential & payment broker for AI agents — handles in, secrets never out"
+    license: Apache-2.0
+    binaries: [valet]
+    # Unsigned binary: clear the Gatekeeper quarantine bit on install
+    # (per goreleaser docs; signing/notarizing needs a paid Apple ID).
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/valet"]
+          end
+    # Upload only when a tap token is present.
+    skip_upload: "{{ if index .Env \"HOMEBREW_TAP_GITHUB_TOKEN\" }}false{{ else }}true{{ end }}"
+
 docker_manifests:
   - name_template: "ghcr.io/joalavedra/valet:{{ .Version }}"
     image_templates:

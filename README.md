@@ -4,6 +4,14 @@
 
 **Status: pre-alpha.** Design doc: [docs/DESIGN.md](docs/DESIGN.md).
 
+## Demo
+
+A Gemini shopping agent buys from a demo store with a card it never sees — VGS-vaulted card, human approval on the phone, PAN swapped in only on the outbound request.
+
+![Valet demo: chat → approval → receipt](docs/media/demo-checkout.webp)
+
+Run it yourself: [demo/README.md](demo/README.md).
+
 ## Architecture
 
 ```
@@ -46,6 +54,10 @@ Prebuilt binaries for Linux, macOS, and Windows are on the
 [GitHub Releases](https://github.com/joalavedra/valet/releases) page.
 
 ```bash
+# Homebrew (tap populated on the next release)
+brew install joalavedra/valet/valet
+# The binary is unsigned — the cask clears the macOS quarantine bit on install.
+
 export VALET_MASTER_PASSWORD="$(openssl rand -base64 24)"  # keep this; it is the owner credential
 
 # Docker (server on 127.0.0.1:14400, data in a named volume)
@@ -310,6 +322,7 @@ Configuration (environment):
 | `VALET_APPROVAL_WEBHOOK` | Optional URL POSTed a JSON notification (`request_id`, `agent`, `handle`, `label`, `purpose`, `policy`, `approve_url`) for each new request. |
 | `VALET_OWNER_TOKEN` | Extra bearer token accepted for owner endpoints (alongside `VALET_MASTER_PASSWORD`). |
 | `VALET_PUBLIC_URL` | Public base URL used to build `approve_url` links; relative when unset. |
+| `VALET_CAPTURE_RETURN_ORIGINS` | Comma-separated origins allowed as capture `return_url` targets. Defaults to the `VALET_PUBLIC_URL` origin; when neither is set, any non-empty `return_url` is rejected. |
 
 Pages: `GET /wallet` (all pending requests + active grants) and
 `GET /approve/<id>` serve the bundled `wallet.html` SPA.
@@ -317,6 +330,7 @@ Pages: `GET /wallet` (all pending requests + active grants) and
 Owner API (bearer = master password or `VALET_OWNER_TOKEN`):
 
 - `GET /v1/owner/handles` — same handle list agents see
+- `DELETE /v1/owner/handles/{handle}` — remove a stored credential (audited as edge `owner`, target `delete`)
 - `GET /v1/owner/approvals?status=pending` — pending/decided requests
 - `POST /v1/owner/approvals/{id}/approve` — issue the grant
 - `POST /v1/owner/approvals/{id}/deny`

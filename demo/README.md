@@ -7,7 +7,7 @@ phone, and Valet injects the aliased card into the demo store's checkout request
 The VGS outbound route reveals the aliases in flight, and the store's Luhn check
 proving a real PAN arrived (`tok_…` aliases are declined with 402).
 
-<!-- screenshot placeholder -->
+![Valet demo: chat → approval → receipt](../docs/media/demo-checkout.webp)
 
 ## Quickstart
 
@@ -28,6 +28,12 @@ docker compose exec valet /valet cred add --type card --label personal --tokeniz
 # card: 4111111111111111, exp 12/2030, cvc 123  (VGS sandbox test Visa)
 ```
 
+Multiple cards: the Wallet tab lists every `card://` handle — "Add card"
+prompts for a label, tapping a card makes it the checkout default, and ✕
+removes it (`DELETE /v1/owner/handles/{handle}`). Checkout always uses the
+default card (`POST /api/card/default`); deleting the default falls back to
+the first remaining card.
+
 Or use the real flow: open the app → Wallet → "Add card" (the `/capture` page is
 served by Valet through the demo's `/valet/*` proxy).
 
@@ -47,7 +53,8 @@ Then in chat: "Buy the coffee beans" → approve the bottom-sheet → receipt.
 | `VALET_PUBLIC_URL` | public valet base — `DEMO_PUBLIC_URL + /valet` |
 | `VALET_REQUIRE_APPROVAL` | `card` (compose default) — makes `card://` grants human-approved |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | Gemini REST (default `gemini-2.5-flash`) |
-| `DEMO_CARD_LABEL` | card handle label (default `personal`) |
+| `DEMO_CARD_LABEL` | initial default card handle label (default `personal`) |
+| `VALET_CAPTURE_RETURN_ORIGINS` | origins allowed as capture `return_url` (compose sets `DEMO_PUBLIC_URL`) |
 | `VGS_CLIENT_ID`/`VGS_CLIENT_SECRET` | service-account OAuth for tokenize + `vgs-route.sh` |
 | `VGS_USERNAME`/`VGS_PASSWORD` | vault access credentials — the outbound proxy auth Valet uses for payments |
 | `VGS_VAULT_ID`/`VGS_ENV` | `tnt…` vault id; `sandbox` (default) or `live` |
@@ -63,4 +70,4 @@ Then in chat: "Buy the coffee beans" → approve the bottom-sheet → receipt.
 ## Limitations
 
 Demo only: fixed catalog, in-memory orders, sandbox VGS vault, fake "store"
-(psp-free). Approval webhook, multi-card, and 3DS are out of scope.
+(psp-free). Approval webhook and 3DS are out of scope.

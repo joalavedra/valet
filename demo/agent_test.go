@@ -67,6 +67,10 @@ func TestAgentCheckoutConcurrentBuysMintOneGrant(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/v1/owner/handles":
+			json.NewEncoder(w).Encode(map[string]any{"handles": []map[string]any{
+				{"handle": "card://personal", "metadata": `{"last4":"1111"}`},
+			}})
 		case "/v1/grants":
 			mu.Lock()
 			grantCalls++
@@ -111,6 +115,10 @@ func TestAgentCheckoutKeepsPendingOnClientDisconnect(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/v1/owner/handles":
+			json.NewEncoder(w).Encode(map[string]any{"handles": []map[string]any{
+				{"handle": "card://personal", "metadata": `{"last4":"1111"}`},
+			}})
 		case "/v1/grants":
 			w.WriteHeader(202)
 			json.NewEncoder(w).Encode(map[string]any{"status": "pending_approval", "request_id": "rid1"})
@@ -143,5 +151,117 @@ func TestAgentCheckoutKeepsPendingOnClientDisconnect(t *testing.T) {
 	a.mu.Unlock()
 	if pa == nil || pa.id != "rid1" {
 		t.Fatalf("pending approval lost on client disconnect: %v", pa)
+	}
+}
+
+func TestAgentCheckoutResolvesDefaultCard(t *testing.T) {
+	// fake valet: handles endpoint returns the given cards; /v1/grants records
+	// the handle and returns an auto-issued grant; pay replies paid.
+	newFake := func(cards []map[string]any, gotHandle *string) *httptest.Server {
+		var mu sync.Mutex
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/v1/owner/handles":
+				json.NewEncoder(w).Encode(map[string]any{"handles": cards})
+			case "/v1/grants":
+				var req map[string]any
+				json.NewDecoder(r.Body).Decode(&req)
+				mu.Lock()
+				*gotHandle, _ = req["handle"].(string)
+				mu.Unlock()
+				json.NewEncoder(w).Encode(map[string]any{"status": "ok", "token": "gtok"})
+			case "/v1/edge/card/pay":
+				json.NewEncoder(w).Encode(map[string]any{"status": "ok", "body": `{"status":"paid","last4":"1111"}`})
+			default:
+				json.NewEncoder(w).Encode(map[string]any{"status": "pending"})
+			}
+		}))
+	}
+	card := map[string]any{"handle": "card://personal", "metadata": `{"last4":"1111"}`}
+	backup := map[string]any{"handle": "card://backup", "metadata": `{"last4":"9999"}`}
+
+	// defaultCard "" + one card → grant for card://personal.
+	var got string
+	srv := newFake([]map[string]any{card}, &got)
+	a := testApp()
+	a.cfg.PublicURL = "https://demo.example"
+	a.valet = newValetClient(srv.URL, "agent", "owner")
+	a.defaultCard = ""
+	res := a.agentCheckout(context.Background(), "conv1", "coffee", 1, func(string, any) {})
+	srv.Close()
+	if res["status"] != "paid" && res["status"] != "ok" {
+		t.Fatalf("want paid, got %v", res)
+	}
+	if got != "card://personal" {
+		t.Fatalf("grant handle: want card://personal, got %q", got)
+	}
+
+	// defaultCard "gone" + handles [backup] → uses backup.
+	got = ""
+	srv = newFake([]map[string]any{backup}, &got)
+	a = testApp()
+	a.cfg.PublicURL = "https://demo.example"
+	a.valet = newValetClient(srv.URL, "agent", "owner")
+	a.defaultCard = "gone"
+	res = a.agentCheckout(context.Background(), "conv1", "coffee", 1, func(string, any) {})
+	srv.Close()
+	if got != "card://backup" {
+		t.Fatalf("grant handle: want card://backup, got %q (res=%v)", got, res)
+	}
+
+	// No cards → no card saved, no grant request.
+	got = ""
+	srv = newFake(nil, &got)
+	a = testApp()
+	a.cfg.PublicURL = "https://demo.example"
+	a.valet = newValetClient(srv.URL, "agent", "owner")
+	a.defaultCard = ""
+	res = a.agentCheckout(context.Background(), "conv1", "coffee", 1, func(string, any) {})
+	srv.Close()
+	if res["status"] != "error" || !strings.Contains(res["reason"].(string), "no card saved") {
+		t.Fatalf("want no-card error, got %v", res)
+	}
+	if got != "" {
+		t.Fatalf("grant request made with no card: %q", got)
+	}
+}
+
+func TestCaptureHandlerRejectsUsedLabel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/owner/handles":
+			json.NewEncoder(w).Encode(map[string]any{"handles": []map[string]any{
+				{"handle": "card://personal", "metadata": `{"last4":"1111"}`},
+			}})
+		case "/v1/owner/captures":
+			json.NewEncoder(w).Encode(map[string]any{"url": "http://x/capture/t"})
+		}
+	}))
+	defer srv.Close()
+	a := testApp()
+	a.valet = newValetClient(srv.URL, "agent", "owner")
+
+	// Existing label → 409.
+	r := httptest.NewRequest("POST", "/api/card/capture", strings.NewReader(`{"label":"personal"}`))
+	w := httptest.NewRecorder()
+	a.captureHandler(w, r)
+	if w.Code != 409 {
+		t.Fatalf("want 409, got %d %s", w.Code, w.Body)
+	}
+	// New label → 200 with capture URL.
+	r = httptest.NewRequest("POST", "/api/card/capture", strings.NewReader(`{"label":"backup"}`))
+	w = httptest.NewRecorder()
+	a.captureHandler(w, r)
+	if w.Code != 200 {
+		t.Fatalf("want 200, got %d %s", w.Code, w.Body)
+	}
+	// Bad label → 400.
+	r = httptest.NewRequest("POST", "/api/card/capture", strings.NewReader(`{"label":"BAD LABEL!"}`))
+	w = httptest.NewRecorder()
+	a.captureHandler(w, r)
+	if w.Code != 400 {
+		t.Fatalf("want 400, got %d", w.Code)
 	}
 }

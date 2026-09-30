@@ -309,6 +309,17 @@ func (f *fakeProvider) CaptureConfig() (card.CaptureConfig, error) {
 	return card.CaptureConfig{Provider: "fake"}, nil
 }
 
+// inspectorProvider adds AliasInspector to fakeProvider.
+type inspectorProvider struct {
+	fakeProvider
+	last4, bin string
+	err        error
+}
+
+func (p *inspectorProvider) InspectAlias(_ context.Context, _ string) (string, string, error) {
+	return p.last4, p.bin, p.err
+}
+
 func cardCred(t *testing.T, srv *Server, st *store.SQLite) {
 	t.Helper()
 	dek := srv.dek
@@ -1414,6 +1425,7 @@ func TestOwnerGrantsEffectiveMaxUsesMin(t *testing.T) {
 }
 
 func TestOwnerCaptures(t *testing.T) {
+	t.Setenv("VALET_CAPTURE_RETURN_ORIGINS", "https://demo.example")
 	srv, st, _, _, own := approvalServer(t, "card")
 	// No auth → 401.
 	code, _ := doJSON(t, srv, "POST", "/v1/owner/captures", "", map[string]any{"label": "personal"})
@@ -1643,5 +1655,233 @@ func TestWalletX402PaymentRejected(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no payment_rejected audit")
+	}
+}
+
+func TestOwnerCapturesReturnOrigins(t *testing.T) {
+	newSrv := func(t *testing.T, origins, public string) *Server {
+		t.Helper()
+		t.Setenv("VALET_REQUIRE_APPROVAL", "card")
+		t.Setenv("VALET_OWNER_TOKEN", "owner-tok")
+		t.Setenv("VALET_CAPTURE_RETURN_ORIGINS", origins)
+		t.Setenv("VALET_PUBLIC_URL", public)
+		st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "s.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		dek, _ := crypto.GenerateDEK()
+		return New(st, grant.NewIssuer(st, dek), audit.New(st), &fakeFiller{}, dek, nil)
+	}
+	post := func(srv *Server, ret string) int {
+		code, _ := doJSON(t, srv, "POST", "/v1/owner/captures", "owner-tok",
+			map[string]any{"label": "x", "return_url": ret})
+		return code
+	}
+
+	// Explicit allowlist: matching origin (case-insensitive) accepted, other rejected.
+	srv := newSrv(t, " https://demo.example , https://ALT.example:8443 ", "")
+	if c := post(srv, "https://demo.example/path?q=1"); c != 201 {
+		t.Fatalf("allowed origin: want 201, got %d", c)
+	}
+	if c := post(srv, "https://alt.example:8443/x"); c != 201 {
+		t.Fatalf("allowed origin w/ port: want 201, got %d", c)
+	}
+	if c := post(srv, "https://evil.example/"); c != 400 {
+		t.Fatalf("disallowed origin: want 400, got %d", c)
+	}
+
+	// Env unset + VALET_PUBLIC_URL set → only that origin accepted.
+	srv = newSrv(t, "", "https://valet.example/valet")
+	if c := post(srv, "https://valet.example/done"); c != 201 {
+		t.Fatalf("public-url origin: want 201, got %d", c)
+	}
+	if c := post(srv, "https://other.example/"); c != 400 {
+		t.Fatalf("non-public origin: want 400, got %d", c)
+	}
+
+	// Neither set → any return_url rejected, empty still ok.
+	srv = newSrv(t, "", "")
+	if c := post(srv, "https://valet.example/"); c != 400 {
+		t.Fatalf("no allowlist: want 400, got %d", c)
+	}
+	code, _ := doJSON(t, srv, "POST", "/v1/owner/captures", "owner-tok", map[string]any{"label": "x"})
+	if code != 201 {
+		t.Fatalf("empty return_url: want 201, got %d", code)
+	}
+}
+
+func TestCaptureCompleteInspectorOverridesClient(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&inspectorProvider{fakeProvider{}, "4242", "424242", nil})
+	tok := newCapture(t, st, "visa-insp", time.Hour)
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_sandbox_pan9", "exp_month": "12", "exp_year": "2030", "last4": "1111", "bin": "411111",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	cred, err := st.GetCredential("card://visa-insp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cred.Metadata, `"last4":"4242"`) ||
+		!strings.Contains(cred.Metadata, `"bin":"424242"`) ||
+		!strings.Contains(cred.Metadata, `"last4_source":"vgs"`) {
+		t.Fatalf("VGS values must win: %s", cred.Metadata)
+	}
+}
+
+func TestCaptureCompleteInspectorFallback(t *testing.T) {
+	srv, st, _ := testServer(t)
+	// Provider without AliasInspector → client values, source client.
+	srv.SetCardProvider(&fakeProvider{})
+	tok := newCapture(t, st, "visa-cli", time.Hour)
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_sandbox_pan8", "exp_month": "12", "exp_year": "2030", "last4": "1111",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	cred, err := st.GetCredential("card://visa-cli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cred.Metadata, `"last4":"1111"`) ||
+		!strings.Contains(cred.Metadata, `"last4_source":"client"`) {
+		t.Fatalf("client values expected: %s", cred.Metadata)
+	}
+	// Inspector error also falls back to client values.
+	srv2, st2, _ := testServer(t)
+	srv2.SetCardProvider(&inspectorProvider{fakeProvider{}, "", "", fmt.Errorf("no creds")})
+	tok2 := newCapture(t, st2, "visa-err", time.Hour)
+	rec = capReq(t, srv2, "POST", "/capture/"+tok2+"/complete", map[string]any{
+		"number": "tok_sandbox_pan7", "exp_month": "12", "exp_year": "2030", "last4": "5555",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	cred, err = st2.GetCredential("card://visa-err")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cred.Metadata, `"last4":"5555"`) ||
+		!strings.Contains(cred.Metadata, `"last4_source":"client"`) {
+		t.Fatalf("fallback expected: %s", cred.Metadata)
+	}
+}
+
+func TestCaptureCompleteUpsertsLabel(t *testing.T) {
+	srv, st, _ := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	for i, tok4 := range []string{"0000", "9999"} {
+		tok := fmt.Sprintf("cap-re-%d", i)
+		if err := st.CreateCapture(&store.Capture{
+			Token: tok, Label: "visa-re", Metadata: `{"provider":"vgs"}`, ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+			"number": "tok_pan_" + tok4, "exp_month": "12", "exp_year": "2030", "last4": tok4,
+		})
+		if rec.Code != 200 {
+			t.Fatalf("capture %d: got %d %s", i, rec.Code, rec.Body)
+		}
+	}
+	creds, _ := st.ListCredentials()
+	n := 0
+	for _, c := range creds {
+		if c.Handle == "card://visa-re" {
+			n++
+			if !strings.Contains(c.Metadata, `"last4":"9999"`) {
+				t.Fatalf("second capture should replace: %s", c.Metadata)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("want 1 credential for card://visa-re, got %d", n)
+	}
+}
+
+func TestOwnerDeleteHandle(t *testing.T) {
+	srv, st, _, _, own := approvalServer(t, "card")
+	cardCred(t, srv, st)
+	// Handles contain :// — they travel %-escaped in the wildcard path.
+	enc := "/v1/owner/handles/card:%2F%2Fvisa-4242"
+	// Wrong/no auth → 401.
+	code, _ := doJSON(t, srv, "DELETE", enc, "", nil)
+	if code != 401 {
+		t.Fatalf("unauth: want 401, got %d", code)
+	}
+	// Unknown handle → 404 (no egress-discovered api:// handles either).
+	code, _ = doJSON(t, srv, "DELETE", "/v1/owner/handles/card:%2F%2Fnope", own, nil)
+	if code != 404 {
+		t.Fatalf("missing: want 404, got %d", code)
+	}
+	code, out := doJSON(t, srv, "DELETE", enc, own, nil)
+	if code != 200 || out["status"] != "deleted" {
+		t.Fatalf("delete: got %d %v", code, out)
+	}
+	if _, err := st.GetCredential("card://visa-4242"); err != store.ErrNotFound {
+		t.Fatalf("credential still present: %v", err)
+	}
+	audits, _ := st.ListAudit(10)
+	found := false
+	for _, a := range audits {
+		if a.Edge == "owner" && a.Target == "delete" && a.Handle == "card://visa-4242" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no owner-delete audit entry")
+	}
+}
+
+func TestCaptureReplaceRevokesGrants(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	// First capture creates card://visa-re.
+	tok := "cap-r1"
+	if err := st.CreateCapture(&store.Capture{Token: tok, Label: "visa-re", Metadata: `{"provider":"vgs"}`, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_pan_1", "exp_month": "12", "exp_year": "2030", "last4": "0000",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("first capture: %d %s", rec.Code, rec.Body)
+	}
+	// A live grant against that handle.
+	grantTok := issueGrantHandle(t, srv, st, agentTok, "card://visa-re", `{"spend":{"per_tx":100}}`, time.Hour)
+	// Re-capture the same label — replaces the credential.
+	tok = "cap-r2"
+	if err := st.CreateCapture(&store.Capture{Token: tok, Label: "visa-re", Metadata: `{"provider":"vgs"}`, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	rec = capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_pan_2", "exp_month": "12", "exp_year": "2031", "last4": "9999",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("second capture: %d %s", rec.Code, rec.Body)
+	}
+	// The old grant is revoked.
+	grantID, _, _ := strings.Cut(grantTok, ".")
+	g, err := st.GetGrant(grantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.RevokedAt == nil {
+		t.Fatal("grant on replaced handle still live")
+	}
+	// Replace audit entry exists.
+	audits, _ := st.ListAudit(20)
+	found := false
+	for _, a := range audits {
+		if a.Edge == "capture" && a.Target == "replace" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no capture/replace audit entry")
 	}
 }

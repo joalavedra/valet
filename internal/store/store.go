@@ -86,8 +86,12 @@ type AuditEntry struct {
 // Store is the persistence contract.
 type Store interface {
 	AddCredential(c *Credential) error
+	// UpsertCredential inserts or replaces the credential at c.Handle
+	// (used by card capture so re-capturing a label refreshes it).
+	UpsertCredential(c *Credential) error
 	GetCredential(h string) (*Credential, error)
 	ListCredentials() ([]Credential, error)
+	DeleteCredential(h string) error
 
 	CreateAgent(name, tokenHash string) (*Agent, error)
 	GetAgentByTokenHash(h string) (*Agent, error)
@@ -100,6 +104,9 @@ type Store interface {
 	RevokeGrant(id string) error
 	// AddGrantSpend atomically adds amount to a grant's cumulative spend.
 	AddGrantSpend(id string, amount int64) error
+	// RevokeGrantsForHandle revokes every live grant and denies every
+	// pending approval request for the handle; returns rows affected.
+	RevokeGrantsForHandle(handle string) (int, error)
 
 	CreateApproval(a *Approval) error
 	GetApproval(id string) (*Approval, error)
