@@ -2158,3 +2158,69 @@ func TestWalletNetworkListParses(t *testing.T) {
 		t.Fatalf("assets %v", gotPol.Assets)
 	}
 }
+
+func TestWalletChainIDsStrict(t *testing.T) {
+	got := walletChainIDs([]string{"eip155:84532", "4217", "solana:dev", "eip155:-1", "eip155:0", "eip155:abc", "", "eip155:42431"})
+	want := []int64{84532, 42431}
+	if len(got) != len(want) {
+		t.Fatalf("chain ids %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("chain ids %v", got)
+		}
+	}
+}
+
+func TestWalletChainAssetsPerChain(t *testing.T) {
+	// Empty/USDC resolves to each chain's own Tempo defaults.
+	ca := walletChainAssets([]string{"eip155:42431", "eip155:4217"}, "USDC")
+	pA := tempo.DefaultCurrenciesForChain(42431)
+	if len(ca[42431]) != len(pA) || len(ca[4217]) == 0 {
+		t.Fatalf("chain assets %v", ca)
+	}
+	if ca[42431][0] == ca[4217][0] && len(pA) == 1 {
+		t.Fatalf("chains share default unexpectedly %v", ca)
+	}
+	// Explicit asset applies to every chain.
+	ca2 := walletChainAssets([]string{"eip155:42431", "eip155:1"}, "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF")
+	if len(ca2[42431]) != 1 || len(ca2[1]) != 1 || ca2[1][0] != "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" {
+		t.Fatalf("explicit chain assets %v", ca2)
+	}
+}
+
+// A Response with Status 0 but a Payment (conn lost after paying) must
+// still record the grant use + spend.
+func TestWalletX402LostResponseStillCounts(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		return &wallet.Response{Status: 0, PaymentAttempted: true, Payment: &wallet.PaymentInfo{
+			Network: "eip155:84532", Asset: "0xusdc", PayTo: "0xp", Amount: "700", Transaction: "0xt",
+		}}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"],"spend":{"total":2000}}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Status string `json:"status"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.Status != "paid" {
+		t.Fatalf("want paid got %s", rec.Body)
+	}
+	g, err := st.GetGrant(strings.SplitN(tok, ".", 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Uses != 1 || g.Spent != 700 {
+		t.Fatalf("uses=%d spent=%d", g.Uses, g.Spent)
+	}
+}

@@ -219,6 +219,14 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 		if errors.As(err, &pe) {
 			return nil, fmt.Errorf("%w: %s", ErrPolicy, ScrubErr(err))
 		}
+		// The payment signature was already sent and the conn died — the
+		// upstream may still settle; conservatively count it as paid.
+		if paidView.network != "" {
+			return &Response{Status: 0, PaymentAttempted: true, Payment: &PaymentInfo{
+				Network: paidView.network, Asset: paidView.asset,
+				PayTo: paidView.payTo, Amount: paidView.amount,
+			}}, nil
+		}
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}
 	defer resp.Body.Close()
