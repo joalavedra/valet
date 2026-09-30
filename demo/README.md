@@ -7,7 +7,7 @@ phone, and Valet injects the aliased card into the demo store's checkout request
 The VGS outbound route reveals the aliases in flight, and the store's Luhn check
 proving a real PAN arrived (`tok_…` aliases are declined with 402).
 
-<!-- screenshot placeholder -->
+![Valet demo: chat → approval → receipt](../docs/media/demo-checkout.webp)
 
 ## Quickstart
 
