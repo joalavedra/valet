@@ -4,6 +4,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -12,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net"
@@ -53,8 +55,11 @@ type Server struct {
 	approvalTTL    time.Duration
 	approvalNotify string
 	ownerToken     string
-	waitersMu      sync.Mutex
-	waiters        map[string]*waiter
+	// captureReturnOrigins restricts capture return_url targets
+	// (VALET_CAPTURE_RETURN_ORIGINS, else the VALET_PUBLIC_URL origin).
+	captureReturnOrigins []string
+	waitersMu            sync.Mutex
+	waiters              map[string]*waiter
 }
 
 // waiter is a shared notification channel for polls on the same request id;
@@ -91,6 +96,16 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 		ownerToken:     os.Getenv("VALET_OWNER_TOKEN"),
 		waiters:        map[string]*waiter{},
 	}
+	s.captureReturnOrigins = parseOrigins(os.Getenv("VALET_CAPTURE_RETURN_ORIGINS"))
+	if len(s.captureReturnOrigins) == 0 {
+		// Default: only Valet's own public origin may be a return target.
+		if pub := os.Getenv("VALET_PUBLIC_URL"); pub != "" {
+			if u, err := url.Parse(pub); err == nil && u.Host != "" &&
+				(u.Scheme == "http" || u.Scheme == "https") {
+				s.captureReturnOrigins = []string{strings.ToLower(u.Scheme + "://" + u.Host)}
+			}
+		}
+	}
 	s.mux.HandleFunc("GET /healthz", s.healthz)
 	s.mux.HandleFunc("GET /v1/handles", s.agentAuth(s.handles))
 	s.mux.HandleFunc("POST /v1/grants", s.agentAuth(s.createGrant))
@@ -100,6 +115,7 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 	s.mux.HandleFunc("POST /v1/edge/http/call", s.agentAuth(s.httpCall))
 	s.mux.HandleFunc("GET /v1/audit", s.ownerAuth(s.listAudit))
 	s.mux.HandleFunc("GET /v1/owner/handles", s.ownerAuth(s.ownerHandles))
+	s.mux.HandleFunc("DELETE /v1/owner/handles/{handle...}", s.ownerAuth(s.ownerDeleteHandle))
 	s.mux.HandleFunc("GET /v1/owner/approvals", s.ownerAuth(s.ownerApprovals))
 	s.mux.HandleFunc("POST /v1/owner/approvals/{id}/approve", s.ownerAuth(s.ownerApprove))
 	s.mux.HandleFunc("POST /v1/owner/approvals/{id}/deny", s.ownerAuth(s.ownerDeny))
@@ -236,7 +252,7 @@ func (s *Server) capturePage(w http.ResponseWriter, r *http.Request) {
 		"VaultID":        cfg.Fields["vault_id"],
 		"Env":            cfg.Fields["environment"],
 		"CollectVersion": cfg.Fields["collect_version"],
-		"ReturnURL":      captureReturnURL(c.Metadata),
+		"ReturnURL":      s.captureReturnURL(c.Metadata),
 	}
 	if data["CollectVersion"] == "" {
 		data["CollectVersion"] = "3.4.0"
@@ -341,12 +357,32 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 	if req.CVC != "" {
 		fields["cvc"] = req.CVC
 	}
-	metaMap := map[string]string{"provider": "vgs", "source": "collect"}
+	// Client-supplied last4/bin are display-only and spoofable; prefer the
+	// card provider's authoritative reveal when it supports AliasInspector.
+	metaMap := map[string]string{"provider": "vgs", "source": "collect", "last4_source": "client"}
 	if last4RE.MatchString(req.Last4) {
 		metaMap["last4"] = req.Last4
 	}
 	if binRE.MatchString(req.Bin) {
 		metaMap["bin"] = req.Bin
+	}
+	if prov, err := s.cardProvider("vgs"); err == nil {
+		if insp, ok := prov.(card.AliasInspector); ok {
+			ictx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			l4, bin, ierr := insp.InspectAlias(ictx, req.Number)
+			cancel()
+			if ierr != nil {
+				slog.Debug("alias inspect failed; keeping client last4", "error", ierr)
+			} else if l4 != "" {
+				metaMap["last4"] = l4
+				metaMap["last4_source"] = "vgs"
+				if bin != "" {
+					metaMap["bin"] = bin
+				} else {
+					delete(metaMap, "bin")
+				}
+			}
+		}
 	}
 	meta, _ := json.Marshal(metaMap)
 	pt, _ := json.Marshal(fields)
@@ -360,7 +396,29 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad label"})
 		return
 	}
-	if err := s.st.AddCredential(&store.Credential{
+	// Replacing an existing card must not leave old grants pointing at the
+	// new credential: revoke live grants + deny pending approvals first.
+	_, replacing := s.st.GetCredential(h.String())
+	if replacing == nil {
+		var pendingIDs []string
+		if aps, err := s.st.ListApprovals("pending"); err == nil {
+			for _, ap := range aps {
+				if ap.Handle == h.String() {
+					pendingIDs = append(pendingIDs, ap.ID)
+				}
+			}
+		}
+		if n, err := s.st.RevokeGrantsForHandle(h.String()); err != nil {
+			slog.Debug("grant revoke on replace failed", "error", err)
+		} else if n > 0 {
+			for _, id := range pendingIDs {
+				s.signalWaiters(id)
+			}
+			detail := fmt.Sprintf("%d grants revoked", n)
+			_ = s.chain.Append(&store.AuditEntry{Handle: h.String(), Edge: "capture", Target: "replace", Decision: "allow", Detail: detail})
+		}
+	}
+	if err := s.st.UpsertCredential(&store.Credential{
 		Handle: h.String(), Type: "card", Label: c.Label,
 		Metadata: string(meta), Ciphertext: ct,
 	}); err != nil {
@@ -407,6 +465,30 @@ func (s *Server) handles(w http.ResponseWriter, r *http.Request, a *store.Agent)
 // ownerHandles exposes the same handle list to the owner.
 func (s *Server) ownerHandles(w http.ResponseWriter, r *http.Request) {
 	s.listHandles(w, r)
+}
+
+// ownerDeleteHandle removes a stored credential (e.g. a card) the owner no
+// longer wants. Handles contain :// so they arrive in the wildcard path.
+func (s *Server) ownerDeleteHandle(w http.ResponseWriter, r *http.Request) {
+	h, err := url.PathUnescape(r.PathValue("handle"))
+	if err != nil || h == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad handle"})
+		return
+	}
+	if _, err := s.st.GetCredential(h); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "handle not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store failed"})
+		return
+	}
+	if err := s.st.DeleteCredential(h); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store failed"})
+		return
+	}
+	_ = s.chain.Append(&store.AuditEntry{Handle: h, Edge: "owner", Target: "delete", Decision: "allow", Detail: h})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // svcHost splits an Agent Vault service host pattern (host/path/*) into
@@ -1346,9 +1428,33 @@ func (s *Server) ownerRevoke(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
+// parseOrigins normalizes a comma-separated origin list: trimmed,
+// lowercased, empty entries dropped.
+func parseOrigins(list string) []string {
+	var out []string
+	for _, o := range strings.Split(list, ",") {
+		if o = strings.ToLower(strings.TrimSpace(o)); o != "" {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// returnOriginAllowed reports whether u's origin is in the allowlist.
+func returnOriginAllowed(allow []string, u *url.URL) bool {
+	origin := strings.ToLower(u.Scheme + "://" + u.Host)
+	for _, a := range allow {
+		if a == origin {
+			return true
+		}
+	}
+	return false
+}
+
 // captureReturnURL extracts an http(s) return_url from capture metadata;
-// anything else is ignored (never redirected to).
-func captureReturnURL(metadata string) string {
+// anything else — including non-allowlisted origins — is ignored (never
+// redirected to).
+func (s *Server) captureReturnURL(metadata string) string {
 	var meta struct {
 		ReturnURL string `json:"return_url"`
 	}
@@ -1357,6 +1463,9 @@ func captureReturnURL(metadata string) string {
 	}
 	u, err := url.Parse(meta.ReturnURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	if !returnOriginAllowed(s.captureReturnOrigins, u) {
 		return ""
 	}
 	return meta.ReturnURL
@@ -1392,6 +1501,10 @@ func (s *Server) ownerCaptures(w http.ResponseWriter, r *http.Request) {
 		u, err := url.Parse(req.ReturnURL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "return_url must be http(s)"})
+			return
+		}
+		if !returnOriginAllowed(s.captureReturnOrigins, u) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "return_url origin not allowed"})
 			return
 		}
 	}

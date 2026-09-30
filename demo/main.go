@@ -31,15 +31,16 @@ type config struct {
 }
 
 type app struct {
-	cfg     config
-	store   *demoStore
-	valet   *valetClient
-	gemini  *geminiClient
-	agent   *chatAgent
-	mu      sync.Mutex
-	orders  []order
-	convs   map[string][]geminiContent
-	pending map[string]*pendingApproval // conversation_id -> in-flight/pending approval
+	cfg         config
+	store       *demoStore
+	valet       *valetClient
+	gemini      *geminiClient
+	agent       *chatAgent
+	mu          sync.Mutex
+	orders      []order
+	convs       map[string][]geminiContent
+	pending     map[string]*pendingApproval // conversation_id -> in-flight/pending approval
+	defaultCard string                      // card:// label used for checkout
 }
 
 // pendingApproval tracks a conversation's grant request so concurrent buys
@@ -73,12 +74,14 @@ func main() {
 		}
 	}
 	a := &app{
-		cfg:     cfg,
-		store:   newDemoStore(),
-		valet:   newValetClient(cfg.ValetURL, cfg.AgentToken, cfg.OwnerToken),
-		convs:   map[string][]geminiContent{},
-		pending: map[string]*pendingApproval{},
+		cfg:         cfg,
+		store:       newDemoStore(),
+		valet:       newValetClient(cfg.ValetURL, cfg.AgentToken, cfg.OwnerToken),
+		convs:       map[string][]geminiContent{},
+		pending:     map[string]*pendingApproval{},
+		defaultCard: cfg.CardLabel,
 	}
+	a.loadState()
 	a.gemini = newGeminiClient(cfg.GeminiKey, cfg.GeminiModel)
 	a.agent = newChatAgent(a)
 
@@ -89,6 +92,8 @@ func main() {
 	mux.HandleFunc("POST /api/chat", a.chatHandler)
 	mux.HandleFunc("GET /api/state", a.stateHandler)
 	mux.HandleFunc("POST /api/card/capture", a.captureHandler)
+	mux.HandleFunc("POST /api/card/default", a.defaultCardHandler)
+	mux.HandleFunc("DELETE /api/card/{label}", a.deleteCardHandler)
 	mux.HandleFunc("POST /api/approvals/{id}/approve", a.decisionHandler("approve"))
 	mux.HandleFunc("POST /api/approvals/{id}/deny", a.decisionHandler("deny"))
 	mux.HandleFunc("POST /api/grants/{id}/revoke", a.revokeHandler)

@@ -29,6 +29,12 @@ type Tokenizer interface {
 	Tokenize(ctx context.Context, values []TokenizeInput) ([]string, error)
 }
 
+// AliasInspector derives non-sensitive display metadata (last4, BIN) for a
+// stored alias. Implementations must never persist or log the raw value.
+type AliasInspector interface {
+	InspectAlias(ctx context.Context, alias string) (last4, bin string, err error)
+}
+
 type CaptureConfig struct {
 	Provider string            `json:"provider"`
 	Fields   map[string]string `json:"fields"` // field name -> iframe/collect config

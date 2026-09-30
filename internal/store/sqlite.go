@@ -72,6 +72,29 @@ func (s *SQLite) AddCredential(c *Credential) error {
 	return nil
 }
 
+func (s *SQLite) UpsertCredential(c *Credential) error {
+	_, err := s.db.Exec(
+		`INSERT INTO credentials (handle, type, site, label, metadata_json, ciphertext) VALUES (?,?,?,?,?,?)
+		 ON CONFLICT(handle) DO UPDATE SET type=excluded.type, site=excluded.site,
+		 label=excluded.label, metadata_json=excluded.metadata_json, ciphertext=excluded.ciphertext`,
+		c.Handle, c.Type, c.Site, c.Label, c.Metadata, c.Ciphertext)
+	if err != nil {
+		return err
+	}
+	return s.db.QueryRow(`SELECT id FROM credentials WHERE handle = ?`, c.Handle).Scan(&c.ID)
+}
+
+func (s *SQLite) DeleteCredential(h string) error {
+	res, err := s.db.Exec(`DELETE FROM credentials WHERE handle = ?`, h)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *SQLite) GetCredential(h string) (*Credential, error) {
 	c := &Credential{}
 	err := s.db.QueryRow(
@@ -192,6 +215,26 @@ func (s *SQLite) RevokeGrant(id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// RevokeGrantsForHandle marks all unrevoked grants for a handle revoked and
+// denies its pending approvals (card replacement must not let old grants
+// charge the new credential).
+func (s *SQLite) RevokeGrantsForHandle(handle string) (int, error) {
+	total := 0
+	for _, q := range []string{
+		`UPDATE grants SET revoked_at=CURRENT_TIMESTAMP WHERE handle = ? AND revoked_at IS NULL`,
+		`UPDATE approvals SET status='denied', decided_at=CURRENT_TIMESTAMP WHERE handle = ? AND status='pending'`,
+	} {
+		res, err := s.db.Exec(q, handle)
+		if err != nil {
+			return total, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			total += int(n)
+		}
+	}
+	return total, nil
 }
 
 func (s *SQLite) CreateApproval(a *Approval) error {
