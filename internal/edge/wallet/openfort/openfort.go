@@ -207,20 +207,32 @@ func (c *Client) CreateBackendAccount(ctx context.Context) (id, address string, 
 	return out.ID, out.Address, nil
 }
 
-// SignHash signs a 32-byte digest with the account's backend wallet and
-// returns the normalized 65-byte signature (v adjusted to 27/28).
-func (c *Client) SignHash(ctx context.Context, accountID string, hash [32]byte) ([]byte, error) {
+// SignBytes signs arbitrary bytes with the account's backend wallet and
+// returns the decoded signature. For EVM accounts the data is a digest;
+// for SVM accounts it is the serialized transaction message and the
+// result is a 64-byte ed25519 signature.
+func (c *Client) SignBytes(ctx context.Context, accountID string, data []byte) ([]byte, error) {
 	var out struct {
 		Signature string `json:"signature"`
 	}
 	err := c.do(ctx, http.MethodPost, "/v2/accounts/backend/"+accountID+"/sign",
-		map[string]any{"data": "0x" + hex.EncodeToString(hash[:])}, &out)
+		map[string]any{"data": "0x" + hex.EncodeToString(data)}, &out)
 	if err != nil {
 		return nil, fmt.Errorf("openfort: sign failed")
 	}
 	sig, err := hex.DecodeString(trim0x(out.Signature))
 	if err != nil {
 		return nil, fmt.Errorf("openfort: bad signature encoding")
+	}
+	return sig, nil
+}
+
+// SignHash signs a 32-byte digest with the account's backend wallet and
+// returns the normalized 65-byte signature (v adjusted to 27/28).
+func (c *Client) SignHash(ctx context.Context, accountID string, hash [32]byte) ([]byte, error) {
+	sig, err := c.SignBytes(ctx, accountID, hash[:])
+	if err != nil {
+		return nil, err
 	}
 	return NormalizeV(sig)
 }
