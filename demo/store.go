@@ -129,6 +129,10 @@ func (a *app) checkoutHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]string{"error": "unknown product " + it.ID})
 			return
 		}
+		if len(p.Rails) > 0 {
+			writeJSON(w, 400, map[string]string{"error": "product " + it.ID + " is crypto-priced; pay via its premium route"})
+			return
+		}
 		if it.Qty < 1 || it.Qty > 10 {
 			writeJSON(w, 400, map[string]string{"error": "bad qty"})
 			return

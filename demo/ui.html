@@ -176,10 +176,12 @@ async function pollPending() {
     const p = (s.pending_approvals || [])[0];
     if (p && p.id) {
       const spend = (p.policy && p.policy.spend) || {};
+      const wallet = p.type === 'wallet' || (p.handle || '').startsWith('wallet://');
+      const rail = wallet ? (/via mpp/.test(p.purpose || '') ? 'mpp' : 'x402') : undefined;
       showApproval({
-        request_id: p.id, purpose: p.purpose || '',
+        request_id: p.id, purpose: p.purpose || '', rail,
         amount_cents: spend.per_tx || 0,
-        merchant: (spend.merchants || [''])[0],
+        merchant: (wallet ? ((p.policy && p.policy.hosts) || ['']) : (spend.merchants || ['']))[0],
         expires_at: p.expires_at || '',
         agent: 'Valet Shopping Agent'
       });

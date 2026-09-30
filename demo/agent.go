@@ -152,6 +152,9 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 	if p == nil {
 		return map[string]any{"status": "error", "reason": "unknown product"}
 	}
+	if len(p.Rails) > 0 {
+		return map[string]any{"status": "error", "reason": "crypto-priced product; use buy_with_wallet"}
+	}
 	total := p.PriceCents * int64(qty)
 	merchant := ""
 	if u, err := url.Parse(a.cfg.PublicURL); err == nil {
@@ -446,6 +449,15 @@ func (a *app) agentWalletBuy(ctx context.Context, convID, productID, rail string
 	if res["status"] != "paid" || pay == nil {
 		return map[string]any{"status": "declined", "reason": "payment not accepted"}
 	}
+	network, _ := pay["network"].(string)
+	tx, _ := pay["transaction"].(string)
+	httpStatus, _ := res["http_status"].(float64)
+	if httpStatus < 200 || httpStatus >= 300 {
+		return map[string]any{
+			"status": "error", "reason": fmt.Sprintf("payment settled but report delivery failed (HTTP %d)", int(httpStatus)),
+			"tx": tx, "network": network, "explorer_url": walletExplorerURL(network, tx),
+		}
+	}
 	var report struct {
 		Title   string `json:"title"`
 		Summary string `json:"summary"`
@@ -453,8 +465,6 @@ func (a *app) agentWalletBuy(ctx context.Context, convID, productID, rail string
 	if body, ok := res["body"].(string); ok {
 		json.Unmarshal([]byte(body), &report)
 	}
-	network, _ := pay["network"].(string)
-	tx, _ := pay["transaction"].(string)
 	id := a.store.nextID.Add(1)
 	o := order{
 		ID:         "ord_" + time.Now().Format("20060102") + "_" + itoa(id),
