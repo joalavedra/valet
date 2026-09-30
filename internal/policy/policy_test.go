@@ -57,3 +57,25 @@ func TestGlobMatchPathSubtree(t *testing.T) {
 		}
 	}
 }
+
+func TestSpendTotal(t *testing.T) {
+	p := &Policy{Spend: &SpendPolicy{PerTx: 1000, Total: 2000}}
+	now := time.Now()
+	g := &GrantView{ExpiresAt: now.Add(time.Hour)}
+	// Under the total: ok.
+	if d := Evaluate(p, g, Request{Amount: 500, Now: now}); !d.Allow {
+		t.Fatalf("want allow, got %v", d)
+	}
+	// spent+amount over total: deny.
+	g2 := &GrantView{ExpiresAt: now.Add(time.Hour), Spent: 1600}
+	if d := Evaluate(p, g2, Request{Amount: 500, Now: now}); d.Allow {
+		t.Fatal("want deny for total")
+	} else if d.Reason != "grant total limit exceeded" {
+		t.Fatalf("bad reason %q", d.Reason)
+	}
+	// Exactly at total: allow.
+	g3 := &GrantView{ExpiresAt: now.Add(time.Hour), Spent: 1500}
+	if d := Evaluate(p, g3, Request{Amount: 500, Now: now}); !d.Allow {
+		t.Fatalf("boundary: want allow, got %v", d)
+	}
+}

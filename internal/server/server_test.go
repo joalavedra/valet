@@ -3,6 +3,11 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,9 +26,11 @@ import (
 	"github.com/joalavedra/valet/internal/edge/browser"
 	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
+	"github.com/joalavedra/valet/internal/edge/wallet"
 	"github.com/joalavedra/valet/internal/grant"
 	"github.com/joalavedra/valet/internal/handle"
 	"github.com/joalavedra/valet/internal/store"
+	"github.com/x402-foundation/x402/go/mechanisms/evm"
 )
 
 type fakeFiller struct {
@@ -1459,6 +1466,198 @@ func TestOwnerCaptures(t *testing.T) {
 	}
 }
 
+func addWalletCred(t *testing.T, srv *Server, st *store.SQLite) {
+	t.Helper()
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(k)
+	pt, _ := json.Marshal(map[string]string{
+		"secret_key": "sk_test_x", "wallet_secret": base64.StdEncoding.EncodeToString(der), "account_id": "acc_x",
+	})
+	ct, err := crypto.Encrypt(srv.dek, pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = st.AddCredential(&store.Credential{
+		Handle: "wallet://agent", Type: "wallet", Label: "agent",
+		Metadata:   `{"provider":"openfort","address":"0xabc","network":"eip155:84532","asset":"USDC"}`,
+		Ciphertext: ct,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func x402Req(t *testing.T, srv *Server, agentTok string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/v1/edge/wallet/x402", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+agentTok)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestWalletX402(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	var gotPol wallet.Policy
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		gotPol = pol
+		return &wallet.Response{
+			Status: 200, Headers: map[string]string{"content-type": "application/json"},
+			Body: `{"ok":true}`,
+			Payment: &wallet.PaymentInfo{
+				Network: "eip155:84532", Asset: "0xusdc", PayTo: "0xpayee",
+				Amount: "700", Transaction: "0xtx1", Payer: "0xabc",
+			},
+		}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"],"spend":{"per_tx":1000,"total":2000}}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/report", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Status  string `json:"status"`
+		Payment struct {
+			Amount      string `json:"amount"`
+			Transaction string `json:"transaction"`
+		} `json:"payment"`
+	}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if out.Status != "paid" || out.Payment.Amount != "700" || out.Payment.Transaction != "0xtx1" {
+		t.Fatalf("bad response %s", rec.Body)
+	}
+	if len(gotPol.Networks) != 1 || gotPol.Networks[0] != "eip155:84532" {
+		t.Fatalf("bad networks %v", gotPol.Networks)
+	}
+	// "USDC" metadata resolves to the network's default asset address.
+	if len(gotPol.Assets) != 1 || !strings.EqualFold(gotPol.Assets[0], "0x036CbD53842c5426634e7929541eC2318f3dCF7e") {
+		t.Fatalf("bad assets %v", gotPol.Assets)
+	}
+	if gotPol.MaxAmount == nil || gotPol.MaxAmount.Int64() != 1000 {
+		t.Fatalf("bad cap %v", gotPol.MaxAmount)
+	}
+	// Spend recorded on the grant.
+	tokID, _, _ := strings.Cut(tok, ".")
+	g, _ := st.GetGrant(tokID)
+	if g.Spent != 700 || g.Uses != 1 {
+		t.Fatalf("spent=%d uses=%d", g.Spent, g.Uses)
+	}
+	// Second call: remaining total (1300) still > per_tx (1000) → cap stays 1000.
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/report", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("second call: %d %s", rec.Code, rec.Body)
+	}
+	// Spend now 1400; cap next call to total-spent=600.
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/report", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("third call: %d", rec.Code)
+	}
+	if gotPol.MaxAmount.Int64() != 600 {
+		t.Fatalf("third cap %v want 600", gotPol.MaxAmount)
+	}
+}
+
+func TestWalletX402Denies(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	// Unscoped grant.
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent", `{}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("unscoped: want 403 got %d %s", rec.Code, rec.Body)
+	}
+	// Wrong handle kind.
+	tok = issueGrantHandle(t, srv, st, agentTok, "cred://github.com/joan", `{"hosts":["api.example.com"]}`, time.Hour)
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("non-wallet: want 403 got %d", rec.Code)
+	}
+	// Non-https URL.
+	tok = issueGrantHandle(t, srv, st, agentTok, "wallet://agent", `{"hosts":["api.example.com"]}`, time.Hour)
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "http://api.example.com/x",
+	})
+	if rec.Code != 400 {
+		t.Fatalf("http url: want 400 got %d", rec.Code)
+	}
+	// Host outside policy.
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://evil.example.com/x",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("bad host: want 403 got %d", rec.Code)
+	}
+	// Fetch policy refusal maps to 403.
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		return nil, fmt.Errorf("%w: over cap", wallet.ErrPolicy)
+	}
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("policy: want 403 got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestWalletX402PaymentRejected(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		return &wallet.Response{Status: 402, PaymentAttempted: true}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"],"spend":{"per_tx":1000,"total":2000}}`, time.Hour)
+	tokID, _, _ := strings.Cut(tok, ".")
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("want 200 got %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Status  string `json:"status"`
+		Payment any    `json:"payment"`
+	}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if out.Status != "ok" || out.Payment != nil {
+		t.Fatalf("bad response %s", rec.Body)
+	}
+	g, _ := st.GetGrant(tokID)
+	if g.Spent != 0 || g.Uses != 0 {
+		t.Fatalf("rejected payment recorded: spent=%d uses=%d", g.Spent, g.Uses)
+	}
+	// Audit shows payment_rejected.
+	audits, _ := st.ListAudit(10)
+	found := false
+	for _, a := range audits {
+		if a.Edge == "wallet" && strings.Contains(a.Detail, "payment_rejected") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no payment_rejected audit")
+	}
+}
+
 func TestOwnerCapturesReturnOrigins(t *testing.T) {
 	newSrv := func(t *testing.T, origins, public string) *Server {
 		t.Helper()
@@ -1684,5 +1883,139 @@ func TestCaptureReplaceRevokesGrants(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no capture/replace audit entry")
+	}
+}
+
+func TestWalletX402ConcurrentSpend(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		time.Sleep(20 * time.Millisecond) // widen the race
+		amt := "10"
+		if pol.MaxAmount != nil && pol.MaxAmount.Int64() < 10 {
+			return nil, fmt.Errorf("%w: grant total limit exceeded", wallet.ErrPolicy)
+		}
+		return &wallet.Response{Status: 200, Payment: &wallet.PaymentInfo{
+			Network: "eip155:84532", Asset: "0xusdc", PayTo: "0xp", Amount: amt, Transaction: "0xt",
+		}}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"],"spend":{"total":15}}`, time.Hour)
+	var wg sync.WaitGroup
+	codes := make(chan int, 2)
+	bodies := make(chan string, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := x402Req(t, srv, agentTok, map[string]any{
+				"grant_token": tok, "url": "https://api.example.com/x",
+			})
+			codes <- rec.Code
+			bodies <- rec.Body.String()
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	close(bodies)
+	paid, denied := 0, 0
+	for c := range codes {
+		if c == 200 {
+			paid++
+		} else if c == 403 {
+			denied++
+		}
+	}
+	if paid != 1 || denied != 1 {
+		t.Fatalf("paid=%d denied=%d", paid, denied)
+	}
+	for b := range bodies {
+		t.Log(b)
+	}
+	tokID, _, _ := strings.Cut(tok, ".")
+	g, _ := st.GetGrant(tokID)
+	if g.Spent != 10 {
+		t.Fatalf("spent=%d want 10", g.Spent)
+	}
+}
+
+func TestCardPaySpendTotal(t *testing.T) {
+	srv, st, tok := testServer(t)
+	cardCred(t, srv, st)
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"charged":true}`)
+	}))
+	defer upstream.Close()
+	srv.SetCardProvider(&fakeProvider{upstream: upstream})
+	gtok := issueGrantHandle(t, srv, st, tok, "card://visa-4242",
+		`{"spend":{"merchants":["*"],"total":15}}`, time.Hour)
+	pay := func() *httptest.ResponseRecorder {
+		rec, req := payReq(t, tok, map[string]any{
+			"grant_token": gtok, "url": upstream.URL + "/charge", "method": "POST",
+			"body": `{"pan":"{{card.number}}"}`, "amount": 10, "currency": "USD",
+		})
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := pay(); rec.Code != 200 {
+		t.Fatalf("first pay: %d %s", rec.Code, rec.Body)
+	}
+	rec := pay()
+	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "grant total limit exceeded") {
+		t.Fatalf("second pay: %d %s", rec.Code, rec.Body)
+	}
+	tokID, _, _ := strings.Cut(gtok, ".")
+	g, _ := st.GetGrant(tokID)
+	if g.Spent != 10 {
+		t.Fatalf("spent=%d", g.Spent)
+	}
+}
+
+func TestOwnerGrantsSpentAndActive(t *testing.T) {
+	t.Setenv("VALET_OWNER_TOKEN", "owner-tok")
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["x"],"spend":{"total":15}}`, time.Hour)
+	tokID, _, _ := strings.Cut(tok, ".")
+	if err := st.AddGrantSpend(tokID, 15); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/v1/owner/grants", nil)
+	req.Header.Set("Authorization", "Bearer owner-tok")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Grants []struct {
+			Spent  int64 `json:"spent"`
+			Active bool  `json:"active"`
+		} `json:"grants"`
+	}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if len(out.Grants) == 0 {
+		t.Fatal("no grants")
+	}
+	for _, gr := range out.Grants {
+		if gr.Spent == 15 && gr.Active {
+			t.Fatal("grant at total still active")
+		}
+	}
+	var wg *struct {
+		Spent  int64 `json:"spent"`
+		Active bool  `json:"active"`
+	}
+	for i := range out.Grants {
+		if out.Grants[i].Spent == 15 {
+			wg = &out.Grants[i]
+		}
+	}
+	if wg == nil || wg.Spent != 15 {
+		t.Fatal("spent not surfaced")
 	}
 }

@@ -35,6 +35,7 @@ type Grant struct {
 	MaxUses   int
 	Uses      int
 	RevokedAt *time.Time
+	Spent     int64 // cumulative spend in minor units (wallet rail)
 	CreatedAt time.Time
 }
 
@@ -101,6 +102,8 @@ type Store interface {
 	ListGrants() ([]Grant, error)
 	IncrementGrantUses(id string) error
 	RevokeGrant(id string) error
+	// AddGrantSpend atomically adds amount to a grant's cumulative spend.
+	AddGrantSpend(id string, amount int64) error
 	// RevokeGrantsForHandle revokes every live grant and denies every
 	// pending approval request for the handle; returns rows affected.
 	RevokeGrantsForHandle(handle string) (int, error)
