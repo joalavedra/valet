@@ -3,6 +3,11 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,9 +26,11 @@ import (
 	"github.com/joalavedra/valet/internal/edge/browser"
 	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
+	"github.com/joalavedra/valet/internal/edge/wallet"
 	"github.com/joalavedra/valet/internal/grant"
 	"github.com/joalavedra/valet/internal/handle"
 	"github.com/joalavedra/valet/internal/store"
+	"github.com/x402-foundation/x402/go/mechanisms/evm"
 )
 
 type fakeFiller struct {
@@ -1444,5 +1451,151 @@ func TestOwnerCaptures(t *testing.T) {
 	code, _ = doJSON(t, srv, "POST", "/v1/owner/captures", own, map[string]any{})
 	if code != 400 {
 		t.Fatalf("no label: want 400, got %d", code)
+	}
+}
+
+func addWalletCred(t *testing.T, srv *Server, st *store.SQLite) {
+	t.Helper()
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(k)
+	pt, _ := json.Marshal(map[string]string{
+		"secret_key": "sk_test_x", "wallet_secret": base64.StdEncoding.EncodeToString(der), "account_id": "acc_x",
+	})
+	ct, err := crypto.Encrypt(srv.dek, pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = st.AddCredential(&store.Credential{
+		Handle: "wallet://agent", Type: "wallet", Label: "agent",
+		Metadata:   `{"provider":"openfort","address":"0xabc","network":"eip155:84532","asset":"USDC"}`,
+		Ciphertext: ct,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func x402Req(t *testing.T, srv *Server, agentTok string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/v1/edge/wallet/x402", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+agentTok)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestWalletX402(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	var gotPol wallet.Policy
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		gotPol = pol
+		return &wallet.Response{
+			Status: 200, Headers: map[string]string{"content-type": "application/json"},
+			Body: `{"ok":true}`,
+			Payment: &wallet.PaymentInfo{
+				Network: "eip155:84532", Asset: "0xusdc", PayTo: "0xpayee",
+				Amount: "700", Transaction: "0xtx1", Payer: "0xabc",
+			},
+		}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"],"spend":{"per_tx":1000,"total":2000}}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/report", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Status  string `json:"status"`
+		Payment struct {
+			Amount      string `json:"amount"`
+			Transaction string `json:"transaction"`
+		} `json:"payment"`
+	}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if out.Status != "paid" || out.Payment.Amount != "700" || out.Payment.Transaction != "0xtx1" {
+		t.Fatalf("bad response %s", rec.Body)
+	}
+	if len(gotPol.Networks) != 1 || gotPol.Networks[0] != "eip155:84532" {
+		t.Fatalf("bad networks %v", gotPol.Networks)
+	}
+	if gotPol.MaxAmount == nil || gotPol.MaxAmount.Int64() != 1000 {
+		t.Fatalf("bad cap %v", gotPol.MaxAmount)
+	}
+	// Spend recorded on the grant.
+	tokID, _, _ := strings.Cut(tok, ".")
+	g, _ := st.GetGrant(tokID)
+	if g.Spent != 700 || g.Uses != 1 {
+		t.Fatalf("spent=%d uses=%d", g.Spent, g.Uses)
+	}
+	// Second call: remaining total (1300) still > per_tx (1000) → cap stays 1000.
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/report", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("second call: %d %s", rec.Code, rec.Body)
+	}
+	// Spend now 1400; cap next call to total-spent=600.
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/report", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("third call: %d", rec.Code)
+	}
+	if gotPol.MaxAmount.Int64() != 600 {
+		t.Fatalf("third cap %v want 600", gotPol.MaxAmount)
+	}
+}
+
+func TestWalletX402Denies(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	// Unscoped grant.
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent", `{}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("unscoped: want 403 got %d %s", rec.Code, rec.Body)
+	}
+	// Wrong handle kind.
+	tok = issueGrantHandle(t, srv, st, agentTok, "cred://github.com/joan", `{"hosts":["api.example.com"]}`, time.Hour)
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("non-wallet: want 403 got %d", rec.Code)
+	}
+	// Non-https URL.
+	tok = issueGrantHandle(t, srv, st, agentTok, "wallet://agent", `{"hosts":["api.example.com"]}`, time.Hour)
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "http://api.example.com/x",
+	})
+	if rec.Code != 400 {
+		t.Fatalf("http url: want 400 got %d", rec.Code)
+	}
+	// Host outside policy.
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://evil.example.com/x",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("bad host: want 403 got %d", rec.Code)
+	}
+	// Fetch policy refusal maps to 403.
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		return nil, fmt.Errorf("%w: over cap", wallet.ErrPolicy)
+	}
+	rec = x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("policy: want 403 got %d %s", rec.Code, rec.Body)
 	}
 }

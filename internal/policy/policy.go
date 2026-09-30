@@ -12,6 +12,7 @@ import (
 type SpendPolicy struct {
 	PerTx     int64    `json:"per_tx,omitempty"`
 	Daily     int64    `json:"daily,omitempty"`
+	Total     int64    `json:"total,omitempty"` // cumulative cap over the grant's life
 	Currency  string   `json:"currency,omitempty"`
 	Merchants []string `json:"merchants,omitempty"`
 }
@@ -49,6 +50,7 @@ type GrantView struct {
 	ExpiresAt time.Time
 	Uses      int
 	MaxUses   int
+	Spent     int64
 }
 
 // Decision is the evaluation result.
@@ -133,6 +135,9 @@ func Evaluate(p *Policy, g *GrantView, req Request) Decision {
 		sp := p.Spend
 		if sp.PerTx > 0 && req.Amount > sp.PerTx {
 			return deny("amount exceeds per-transaction limit")
+		}
+		if sp.Total > 0 && g.Spent+req.Amount > sp.Total {
+			return deny("grant total limit exceeded")
 		}
 		if len(sp.Merchants) > 0 {
 			ok := false

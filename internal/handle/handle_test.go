@@ -9,6 +9,8 @@ func TestNewAndParse(t *testing.T) {
 	}{
 		{"cred", "github.com", "joan", "cred://github.com/joan", false},
 		{"card", "", "visa-4242", "card://visa-4242", false},
+		{"wallet", "", "agent", "wallet://agent", false},
+		{"wallet", "", "", "", true},
 		{"cred", "", "x", "", true},
 		{"card", "", "", "", true},
 		{"oauth", "a", "b", "", true},

@@ -8,7 +8,8 @@ import (
 )
 
 // Handle is an opaque URI referencing a stored credential: cred://<site>/<label>
-// for logins and API keys, card://<label> for payment cards.
+// for logins and API keys, card://<label> for payment cards,
+// wallet://<label> for backend wallets.
 type Handle string
 
 var segment = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -28,6 +29,11 @@ func New(kind, site, label string) (Handle, error) {
 			return "", fmt.Errorf("invalid card handle %q", label)
 		}
 		return Handle("card://" + label), nil
+	case "wallet":
+		if !segment.MatchString(label) {
+			return "", fmt.Errorf("invalid wallet handle %q", label)
+		}
+		return Handle("wallet://" + label), nil
 	default:
 		return "", fmt.Errorf("unknown handle kind %q", kind)
 	}
@@ -53,6 +59,12 @@ func Parse(h string) (kind, site, label string, err error) {
 			return "", "", "", fmt.Errorf("malformed card handle %q", h)
 		}
 		return "card", "", rest, nil
+	}
+	if rest, ok := strings.CutPrefix(h, "wallet://"); ok {
+		if rest == "" {
+			return "", "", "", fmt.Errorf("malformed wallet handle %q", h)
+		}
+		return "wallet", "", rest, nil
 	}
 	return "", "", "", fmt.Errorf("unrecognized handle %q", h)
 }

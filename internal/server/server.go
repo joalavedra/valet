@@ -4,6 +4,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -14,6 +15,7 @@ import (
 	"errors"
 	"html/template"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,10 +31,13 @@ import (
 	"github.com/joalavedra/valet/internal/edge/browser"
 	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
+	"github.com/joalavedra/valet/internal/edge/wallet"
+	"github.com/joalavedra/valet/internal/edge/wallet/openfort"
 	"github.com/joalavedra/valet/internal/grant"
 	"github.com/joalavedra/valet/internal/handle"
 	"github.com/joalavedra/valet/internal/policy"
 	"github.com/joalavedra/valet/internal/store"
+	"github.com/x402-foundation/x402/go/mechanisms/evm"
 )
 
 // Server holds dependencies for the HTTP API.
@@ -97,6 +102,7 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 	s.mux.HandleFunc("GET /v1/grants/requests/{id}", s.agentAuth(s.grantRequestStatus))
 	s.mux.HandleFunc("POST /v1/edge/browser/fill", s.agentAuth(s.browserFill))
 	s.mux.HandleFunc("POST /v1/edge/card/pay", s.agentAuth(s.cardPay))
+	s.mux.HandleFunc("POST /v1/edge/wallet/x402", s.agentAuth(s.walletX402))
 	s.mux.HandleFunc("POST /v1/edge/http/call", s.agentAuth(s.httpCall))
 	s.mux.HandleFunc("GET /v1/audit", s.ownerAuth(s.listAudit))
 	s.mux.HandleFunc("GET /v1/owner/handles", s.ownerAuth(s.ownerHandles))
@@ -476,8 +482,14 @@ func (s *Server) approvalRequired(credType string, p *policy.Policy) bool {
 		return true
 	case "none":
 		return false
-	default: // "card"
-		return credType == "card"
+	default:
+		// Comma-separated credential kinds, e.g. "card,wallet".
+		for _, t := range strings.Split(s.approvalMode, ",") {
+			if strings.TrimSpace(t) == credType {
+				return true
+			}
+		}
+		return false
 	}
 }
 
@@ -797,6 +809,175 @@ func (s *Server) cardProvider(name string) (card.Provider, error) {
 
 // SetCardProvider overrides the card-vault provider (used by tests).
 func (s *Server) SetCardProvider(p card.Provider) { s.cardProv = p }
+
+// walletFetch does the x402 fetch; replaceable in tests.
+var walletFetch = wallet.Fetch
+
+// SetWalletFetcher overrides the x402 fetch implementation (used by tests).
+func (s *Server) SetWalletFetcher(f func(context.Context, evm.ClientEvmSigner, wallet.Request, wallet.Policy) (*wallet.Response, error)) {
+	walletFetch = f
+}
+
+type x402Request struct {
+	GrantToken string            `json:"grant_token"`
+	URL        string            `json:"url"`
+	Method     string            `json:"method"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	Body       string            `json:"body"`
+	MaxAmount  int64             `json:"max_amount"` // caller cap, minor units; 0 = none
+}
+
+func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Agent) {
+	var req x402Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
+		return
+	}
+	g, err := s.issuer.Verify(req.GrantToken, a.ID)
+	if err != nil {
+		s.auditDeny(a.ID, "", "wallet", "", grantReason(err))
+		writeJSON(w, grantStatus(err), map[string]string{"error": grantErrorMessage(err, grantReason(err))})
+		return
+	}
+	kind, _, _, err := handle.Parse(g.Handle)
+	if err != nil || kind != "wallet" {
+		s.auditDeny(a.ID, g.Handle, "wallet", "", "not_wallet_handle")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant is not for a wallet handle"})
+		return
+	}
+	u, err := url.Parse(req.URL)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		s.auditDeny(a.ID, g.Handle, "wallet", "", "bad_url")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid url"})
+		return
+	}
+	target := u.Hostname()
+	var p policy.Policy
+	if err := json.Unmarshal([]byte(g.Policy), &p); err != nil {
+		s.auditDeny(a.ID, g.Handle, "wallet", target, "grant_invalid")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant_invalid"})
+		return
+	}
+	// Wallet grants must be scoped to hosts — payment network/amounts are
+	// unknown until the 402 arrives, so host scope is the hard outer fence.
+	if len(p.Hosts) == 0 {
+		s.auditDeny(a.ID, g.Handle, "wallet", target, "unscoped_wallet_grant")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet grant must restrict hosts"})
+		return
+	}
+	d := policy.Evaluate(&p, &policy.GrantView{ExpiresAt: g.ExpiresAt, Uses: g.Uses, MaxUses: g.MaxUses, Spent: g.Spent}, policy.Request{
+		Host: target, Method: req.Method, Path: u.Path, Now: time.Now(),
+	})
+	if !d.Allow {
+		s.auditDeny(a.ID, g.Handle, "wallet", target, d.Reason)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": d.Reason})
+		return
+	}
+	cred, err := s.st.GetCredential(g.Handle)
+	if err != nil {
+		s.auditDeny(a.ID, g.Handle, "wallet", target, "credential_error")
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown handle"})
+		return
+	}
+	var meta struct {
+		Provider string `json:"provider"`
+		Address  string `json:"address"`
+		Network  string `json:"network"`
+		Asset    string `json:"asset"`
+	}
+	json.Unmarshal([]byte(cred.Metadata), &meta)
+	if meta.Provider != "openfort" || meta.Address == "" || meta.Network == "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
+		return
+	}
+	fields, err := s.credValues(cred)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "credential decrypt failed"})
+		return
+	}
+	defer func() {
+		for k := range fields {
+			fields[k] = ""
+		}
+	}()
+	of, err := openfort.New(fields["secret_key"], fields["wallet_secret"])
+	if err != nil {
+		slog.Debug("openfort client init failed", "error", err)
+		s.auditDeny(a.ID, g.Handle, "wallet", target, "wallet_error")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "wallet unavailable"})
+		return
+	}
+	accountID := fields["account_id"]
+	if accountID == "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet has no account_id"})
+		return
+	}
+	// Per-call cap = smallest of the configured ceilings.
+	var capAmt *big.Int
+	capAt := func(v int64) {
+		if v <= 0 {
+			return
+		}
+		n := big.NewInt(v)
+		if capAmt == nil || n.Cmp(capAmt) < 0 {
+			capAmt = n
+		}
+	}
+	if p.Spend != nil {
+		capAt(p.Spend.PerTx)
+		if p.Spend.Total > 0 {
+			capAt(p.Spend.Total - g.Spent)
+		}
+	}
+	capAt(req.MaxAmount)
+	if p.Spend != nil && p.Spend.Total > 0 && p.Spend.Total-g.Spent <= 0 {
+		s.auditDeny(a.ID, g.Handle, "wallet", target, "grant total limit exceeded")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant total limit exceeded"})
+		return
+	}
+	signer := wallet.NewSigner(of, accountID, meta.Address)
+	res, err := walletFetch(r.Context(), signer, wallet.Request{
+		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
+	}, wallet.Policy{
+		MaxAmount: capAmt,
+		Networks:  []string{meta.Network},
+		Assets:    []string{meta.Asset},
+	})
+	if err != nil {
+		if errors.Is(err, wallet.ErrPolicy) {
+			s.auditDeny(a.ID, g.Handle, "wallet", target, "policy_denied")
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "payment not allowed by policy"})
+			return
+		}
+		slog.Debug("x402 fetch failed", "error", err)
+		s.auditDeny(a.ID, g.Handle, "wallet", target, "fetch_error")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetch failed"})
+		return
+	}
+	status := "ok"
+	if res.Payment != nil {
+		status = "paid"
+		if _, err := s.issuer.Consume(req.GrantToken, a.ID); err != nil {
+			slog.Debug("grant consume after payment failed", "error", err)
+		}
+		if amt, ok := wallet.Amount(res.Payment); ok && amt.IsInt64() {
+			if err := s.st.AddGrantSpend(g.ID, amt.Int64()); err != nil {
+				slog.Debug("spend record failed", "error", err)
+			}
+		}
+		detail, _ := json.Marshal(map[string]string{
+			"status": "paid", "amount": res.Payment.Amount, "asset": res.Payment.Asset,
+			"network": res.Payment.Network, "pay_to": res.Payment.PayTo, "tx": res.Payment.Transaction,
+		})
+		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "wallet", Target: target, Decision: "allow", Detail: string(detail)})
+	} else {
+		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "wallet", Target: target, Decision: "allow", Detail: `{"status":"no_payment"}`})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": status, "http_status": res.Status, "headers": res.Headers,
+		"body": res.Body, "truncated": res.Truncated, "payment": res.Payment,
+	})
+}
 
 func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent) {
 	var req payRequest

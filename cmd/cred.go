@@ -16,12 +16,14 @@ import (
 
 	"github.com/joalavedra/valet/internal/crypto"
 	"github.com/joalavedra/valet/internal/edge/card"
+	"github.com/joalavedra/valet/internal/edge/wallet/openfort"
 	"github.com/joalavedra/valet/internal/handle"
 	"github.com/joalavedra/valet/internal/store"
 )
 
 var credAddType, credAddLabel, credAddSite, credAddLast4 string
 var credAddTokenize bool
+var credAddAddress, credAddNetwork string
 
 var stdinReader = bufio.NewReader(os.Stdin)
 
@@ -55,6 +57,8 @@ var credAddCmd = &cobra.Command{
 			h, err = handle.New("cred", credAddSite, credAddLabel)
 		case "card":
 			h, err = handle.New("card", "", credAddLabel)
+		case "wallet":
+			h, err = handle.New("wallet", "", credAddLabel)
 		default:
 			return fmt.Errorf("unknown --type %q", credAddType)
 		}
@@ -74,6 +78,8 @@ var credAddCmd = &cobra.Command{
 			} else {
 				prompts = []string{"number (alias)", "exp_month", "exp_year", "holder", "cvc (optional)"}
 			}
+		case "wallet":
+			prompts = []string{"secret_key", "wallet_secret", "account_id (optional)"}
 		}
 		fieldName := func(prompt string) string {
 			return strings.Split(prompt, " ")[0]
@@ -103,9 +109,16 @@ var credAddCmd = &cobra.Command{
 			raw[k] = "" // best-effort zero of raw values
 		}
 		metadata := "{}"
-		if credAddType == "card" {
+		switch credAddType {
+		case "card":
 			meta, _ := json.Marshal(map[string]string{"provider": "vgs", "last4": credAddLast4})
 			metadata = string(meta)
+		case "wallet":
+			meta, err := walletMetadata(context.Background(), fields, credAddAddress, credAddNetwork)
+			if err != nil {
+				return err
+			}
+			metadata = meta
 		}
 		pt, _ := json.Marshal(fields)
 		ct, err := crypto.Encrypt(dek, pt)
@@ -118,11 +131,52 @@ var credAddCmd = &cobra.Command{
 		}); err != nil {
 			return err
 		}
-		if credAddType == "card" {
+		switch credAddType {
+		case "card":
 			fmt.Printf("stored card://%s (alias ...%s)\n", credAddLabel, credAddLast4)
+		case "wallet":
+			var m struct {
+				Address string `json:"address"`
+				Network string `json:"network"`
+			}
+			json.Unmarshal([]byte(metadata), &m)
+			fmt.Printf("stored wallet://%s (%s on %s)\n", credAddLabel, m.Address, m.Network)
 		}
 		return nil
 	},
+}
+
+// walletMetadata resolves the wallet address — from --address, or by
+// creating a new Openfort backend account when account_id was left empty —
+// and returns the credential metadata JSON.
+func walletMetadata(ctx context.Context, fields map[string]string, address, network string) (string, error) {
+	if network == "" {
+		network = "eip155:84532"
+	}
+	if fields["account_id"] == "" {
+		if fields["secret_key"] == "" || fields["wallet_secret"] == "" {
+			return "", fmt.Errorf("secret_key and wallet_secret required to create a backend account")
+		}
+		of, err := openfort.New(fields["secret_key"], fields["wallet_secret"])
+		if err != nil {
+			return "", err
+		}
+		id, addr, err := of.CreateBackendAccount(ctx)
+		if err != nil {
+			return "", fmt.Errorf("create backend account: %w", err)
+		}
+		fields["account_id"] = id
+		address = addr
+		fmt.Fprintf(os.Stderr, "created backend account %s\n", id)
+	}
+	if !strings.HasPrefix(address, "0x") {
+		return "", fmt.Errorf("--address 0x.. required when account_id is given")
+	}
+	meta, _ := json.Marshal(map[string]string{
+		"provider": "openfort", "address": address,
+		"network": network, "asset": "USDC",
+	})
+	return string(meta), nil
 }
 
 // tokenizeCardFields replaces raw["number"]/raw["cvc"] with provider aliases
@@ -210,6 +264,8 @@ func init() {
 	credAddCmd.Flags().StringVar(&credAddLabel, "label", "", "credential label")
 	credAddCmd.Flags().StringVar(&credAddSite, "site", "", "site/domain the credential is for")
 	credAddCmd.Flags().StringVar(&credAddLast4, "last4", "", "last four digits (card only, recorded in metadata)")
+	credAddCmd.Flags().StringVar(&credAddAddress, "address", "", "wallet only: 0x EVM address (required when account_id is given)")
+	credAddCmd.Flags().StringVar(&credAddNetwork, "network", "eip155:84532", "wallet only: CAIP-2 network the wallet may pay on")
 	credAddCmd.Flags().BoolVar(&credAddTokenize, "tokenize", false, "card only: tokenize the raw PAN/CVC via the provider's Vault API (VGS_CLIENT_ID/VGS_CLIENT_SECRET) and store only the aliases")
 	credAddCmd.MarkFlagRequired("type")
 	credAddCmd.MarkFlagRequired("label")

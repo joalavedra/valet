@@ -256,6 +256,43 @@ See [deploy/hotdesk](deploy/hotdesk) for a drop-in hotdesk desktop image that
 bundles Valet into `hotdesk-desktop` (supervisor-managed server, credentials
 encrypted in the persistent `/home/cua` volume, MCP via `docker exec`).
 
+## Wallets (x402 / Openfort)
+
+Agents can pay for HTTP resources that answer `402 Payment Required`
+([x402](https://x402.org), USDC on Base) from an
+[Openfort](https://openfort.io) backend wallet — without ever holding the
+Openfort secret key, wallet secret, or being able to sign arbitrary
+transactions. The agent holds a `wallet://` handle; Valet signs only
+x402 `exact`-scheme EIP-3009 authorizations at the edge and returns a
+payment receipt.
+
+```bash
+valet cred add --type wallet --label agent
+# prompts: secret_key, wallet_secret, account_id (optional)
+# leave account_id empty to create a new backend account, or pass
+# --address 0x.. --network eip155:84532 for an existing one
+```
+
+Grant it like a card (host scope is required):
+
+```json
+{"hosts":["api.example.com"],"ttl":3600,"spend":{"per_tx":100000,"total":1000000,"currency":"USDC"}}
+```
+
+`per_tx` and `total` are USDC minor units (6dp); `total` is cumulative
+over the grant's life. The MCP tool:
+
+```
+x402_fetch(grant, url, method, headers, body, max_amount)
+```
+
+returns `{status:"ok"|"paid", http_status, headers, body, payment:
+{network, asset, pay_to, amount, transaction}}`. The edge only pays when
+the server's offer matches the wallet's configured network/asset and is
+within `min(per_tx, total-spent, max_amount)`; otherwise the call is
+denied and nothing is signed. Set `VALET_REQUIRE_APPROVAL=card,wallet`
+to require owner approval for wallet grants too.
+
 ## Human approvals & wallet
 
 Grant requests can require a human decision before a token is issued. An
@@ -267,7 +304,7 @@ Configuration (environment):
 
 | Variable | Meaning |
 |---|---|
-| `VALET_REQUIRE_APPROVAL` | `card` (default: any `card://` handle needs approval), `all`, or `none`. `policy.require_human` on a request always forces approval. |
+| `VALET_REQUIRE_APPROVAL` | `card` (default: any `card://` handle needs approval), `all`, `none`, or a comma list like `card,wallet`. `policy.require_human` on a request always forces approval. |
 | `VALET_APPROVAL_TTL` | How long a pending request stays live (Go duration, default `10m`). |
 | `VALET_APPROVAL_WEBHOOK` | Optional URL POSTed a JSON notification (`request_id`, `agent`, `handle`, `label`, `purpose`, `policy`, `approve_url`) for each new request. |
 | `VALET_OWNER_TOKEN` | Extra bearer token accepted for owner endpoints (alongside `VALET_MASTER_PASSWORD`). |
