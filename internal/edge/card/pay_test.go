@@ -295,3 +295,36 @@ func TestDoKeepsNonSecretFields(t *testing.T) {
 		t.Fatalf("secrets leaked: %s", res.Body)
 	}
 }
+
+func TestVGSInspectAlias(t *testing.T) {
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"access_token":"tok_test"}`)
+	}))
+	vault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || !strings.HasPrefix(r.URL.Path, "/aliases/") {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer tok_test" {
+			t.Error("missing bearer")
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"value": "4111 1111 1111 4242"}},
+		})
+	}))
+	t.Cleanup(func() { auth.Close(); vault.Close() })
+	v := &VGS{ClientID: "id", ClientSecret: "sec", authURL: auth.URL, vaultAPIURL: vault.URL}
+	last4, bin, err := v.InspectAlias(context.Background(), "tok_x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last4 != "4242" || bin != "411111" {
+		t.Fatalf("got last4=%q bin=%q", last4, bin)
+	}
+}
+
+func TestVGSInspectAliasMissingCreds(t *testing.T) {
+	v := &VGS{}
+	if _, _, err := v.InspectAlias(context.Background(), "tok_x"); err == nil {
+		t.Fatal("want error")
+	}
+}

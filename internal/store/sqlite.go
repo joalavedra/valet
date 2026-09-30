@@ -62,13 +62,25 @@ func OpenSQLite(path string) (*SQLite, error) {
 var ErrNotFound = errors.New("store: not found")
 
 func (s *SQLite) AddCredential(c *Credential) error {
-	res, err := s.db.Exec(
-		`INSERT INTO credentials (handle, type, site, label, metadata_json, ciphertext) VALUES (?,?,?,?,?,?)`,
+	_, err := s.db.Exec(
+		`INSERT INTO credentials (handle, type, site, label, metadata_json, ciphertext) VALUES (?,?,?,?,?,?)
+		 ON CONFLICT(handle) DO UPDATE SET type=excluded.type, site=excluded.site,
+		 label=excluded.label, metadata_json=excluded.metadata_json, ciphertext=excluded.ciphertext`,
 		c.Handle, c.Type, c.Site, c.Label, c.Metadata, c.Ciphertext)
 	if err != nil {
 		return err
 	}
-	c.ID, _ = res.LastInsertId()
+	return s.db.QueryRow(`SELECT id FROM credentials WHERE handle = ?`, c.Handle).Scan(&c.ID)
+}
+
+func (s *SQLite) DeleteCredential(h string) error {
+	res, err := s.db.Exec(`DELETE FROM credentials WHERE handle = ?`, h)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
 	return nil
 }
 

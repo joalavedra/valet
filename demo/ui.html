@@ -198,13 +198,18 @@ async function loadWallet() {
   const s = await (await fetch('/api/state')).json();
   const b = $('wallet-body');
   let h = '';
-  if (!s.card_saved) {
+  const cards = s.cards || [];
+  if (!cards.length) {
     h += `<div class="card"><div class="t">No card yet</div><div class="big">Add a card to your Valet</div>
       <div class="muted" style="margin:6px 0">Card data goes to the vault directly — Valet never sees it.</div>
       <button class="btn primary" id="addcard">Add card</button></div>`;
   } else {
-    h += `<div class="card"><div class="t">Saved card</div><div class="big">💳 **** ${esc(s.card_last4 || '')}</div>
-      <div class="muted">Saved via VGS${s.card_bin ? ' · ' + esc(s.card_bin) + '…' : ''}</div></div>`;
+    h += `<div class="card"><div class="t">Saved cards</div>` +
+      cards.map(c => `<div class="grant"><span>💳 **** ${esc(c.last4 || '????')} · ${esc(c.label)}
+        <div class="muted">Saved via VGS${c.bin ? ' · ' + esc(c.bin) + '…' : ''}</div></span>
+        <span style="white-space:nowrap">${c.verified ? '<span class="muted" style="color:#5fb878">verified</span> ' : ''}${c.label === s.default_card ? '<span class="muted">default</span>' : `<button class="btn" onclick="setDefault('${esc(c.label)}')">Set default</button>`}
+        <button class="btn danger" onclick="delCard('${esc(c.label)}')">✕</button></span></div>`).join('') +
+      `<button class="btn" id="addcard" style="margin-top:8px">Add card</button></div>`;
   }
   h += '<div class="card"><div class="t">Active grants</div>';
   const grants = (s.grants || []).filter(g => g.active);
@@ -217,17 +222,26 @@ async function loadWallet() {
   b.innerHTML = h + '</div>';
   const btn = $('addcard');
   if (btn) btn.onclick = async () => {
-    const r = await (await fetch('/api/card/capture', {method:'POST'})).json();
-    window.location = r.url;
+    const n = (s.cards || []).length;
+    const label = prompt('Label for this card', n ? `card-${n + 1}` : 'personal');
+    if (label === null) return;
+    const r = await (await fetch('/api/card/capture', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label})})).json();
+    if (r.url) window.location = r.url; else toast(r.error || 'capture failed');
   };
 }
 async function revoke(id) { await fetch('/api/grants/' + id + '/revoke', {method:'POST'}); loadWallet(); toast('Grant revoked'); }
+async function setDefault(label) { await fetch('/api/card/default', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label})}); loadWallet(); }
+async function delCard(label) {
+  if (!confirm(`Remove card “${label}”?`)) return;
+  await fetch('/api/card/' + encodeURIComponent(label), {method:'DELETE'});
+  loadWallet(); toast('Card removed');
+}
 
 $('tab-chat').onclick = () => { $('tab-chat').classList.add('on'); $('tab-wallet').classList.remove('on'); $('chat-view').classList.add('active'); $('wallet-view').classList.remove('active'); };
 $('tab-wallet').onclick = () => { $('tab-wallet').classList.add('on'); $('tab-chat').classList.remove('on'); $('wallet-view').classList.add('active'); $('chat-view').classList.remove('active'); loadWallet(); };
 
 if (new URLSearchParams(location.search).get('saved')) toast('Card saved');
-loadWallet().then(() => { fetch('/api/state').then(r=>r.json()).then(s => { if (!s.card_saved) $('sub').textContent = '— no card yet'; }); });
+loadWallet().then(() => { fetch('/api/state').then(r=>r.json()).then(s => { if (!(s.cards || []).length) $('sub').textContent = '— no card yet'; }); });
 bubble('sys', 'Chat with the shopping agent — payments need your approval.');
 pollPending();
 </script>

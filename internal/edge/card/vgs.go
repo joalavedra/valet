@@ -101,12 +101,10 @@ func (v *VGS) Transport() (http.RoundTripper, error) {
 	}, nil
 }
 
-// Tokenize creates aliases via the VGS Vault API (OAuth2 client-credentials
-// against the service account). Returned aliases are in the same order as
-// inputs; raw values are never persisted here.
-func (v *VGS) Tokenize(ctx context.Context, values []TokenizeInput) ([]string, error) {
+// accessToken fetches an OAuth2 client-credentials token for the Vault API.
+func (v *VGS) accessToken(ctx context.Context) (string, error) {
 	if v.ClientID == "" || v.ClientSecret == "" {
-		return nil, errors.New("vgs: VGS_CLIENT_ID/VGS_CLIENT_SECRET not set")
+		return "", errors.New("vgs: VGS_CLIENT_ID/VGS_CLIENT_SECRET not set")
 	}
 	authURL := v.authURL
 	if authURL == "" {
@@ -119,31 +117,100 @@ func (v *VGS) Tokenize(ctx context.Context, values []TokenizeInput) ([]string, e
 	}
 	req, err := http.NewRequestWithContext(ctx, "POST", authURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("vgs: tokenize auth failed (status %d)", resp.StatusCode)
+		return "", fmt.Errorf("vgs: auth failed (status %d)", resp.StatusCode)
 	}
 	var tok struct {
 		AccessToken string `json:"access_token"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&tok); err != nil || tok.AccessToken == "" {
-		return nil, errors.New("vgs: tokenize auth returned no access_token")
+		return "", errors.New("vgs: auth returned no access_token")
+	}
+	return tok.AccessToken, nil
+}
+
+// vaultAPIBase is the Vault HTTP API base URL for this vault/environment.
+func (v *VGS) vaultAPIBase() string {
+	if v.vaultAPIURL != "" {
+		return v.vaultAPIURL
 	}
 	env := v.Env
 	if env == "" {
 		env = "sandbox"
 	}
-	apiBase := v.vaultAPIURL
-	if apiBase == "" {
-		apiBase = fmt.Sprintf("https://%s.%s.vault-api.verygoodvault.com", v.VaultID, env)
+	return fmt.Sprintf("https://%s.%s.vault-api.verygoodvault.com", v.VaultID, env)
+}
+
+// InspectAlias reveals an alias via the Vault API and derives display-only
+// last4/BIN from it. The raw value is zeroed before returning and never
+// logged or persisted.
+func (v *VGS) InspectAlias(ctx context.Context, alias string) (string, string, error) {
+	tok, err := v.accessToken(ctx)
+	if err != nil {
+		return "", "", err
 	}
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		v.vaultAPIBase()+"/aliases/"+url.PathEscape(alias), nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return "", "", fmt.Errorf("vgs: inspect alias failed (status %d)", resp.StatusCode)
+	}
+	var out struct {
+		Data []struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || len(out.Data) == 0 {
+		return "", "", errors.New("vgs: inspect alias bad response")
+	}
+	raw := []byte(out.Data[0].Value)
+	defer func() {
+		for i := range raw {
+			raw[i] = 0
+		}
+	}()
+	digits := make([]byte, 0, len(raw))
+	for _, c := range raw {
+		if c >= '0' && c <= '9' {
+			digits = append(digits, c)
+		}
+	}
+	if len(digits) < 4 {
+		return "", "", errors.New("vgs: alias does not reveal a card number")
+	}
+	last4 := string(digits[len(digits)-4:])
+	bin := ""
+	if len(digits) >= 13 {
+		bin = string(digits[:6])
+	}
+	return last4, bin, nil
+}
+
+// Tokenize creates aliases via the VGS Vault API (OAuth2 client-credentials
+// against the service account). Returned aliases are in the same order as
+// inputs; raw values are never persisted here.
+func (v *VGS) Tokenize(ctx context.Context, values []TokenizeInput) ([]string, error) {
+	tok, err := v.accessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	apiBase := v.vaultAPIBase()
 	type item struct {
 		Value       string   `json:"value"`
 		Classifiers []string `json:"classifiers,omitempty"`
@@ -166,7 +233,7 @@ func (v *VGS) Tokenize(ctx context.Context, values []TokenizeInput) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	areq.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	areq.Header.Set("Authorization", "Bearer "+tok)
 	areq.Header.Set("Content-Type", "application/json")
 	aresp, err := http.DefaultClient.Do(areq)
 	if err != nil {

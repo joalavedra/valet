@@ -40,8 +40,34 @@ func TestCredentialRoundTrip(t *testing.T) {
 	if _, err := s.GetCredential("cred://no/x"); err != ErrNotFound {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
-	if err := s.AddCredential(c); err == nil {
-		t.Fatal("want unique constraint error")
+	// Re-adding the same handle upserts (re-capture replaces the card).
+	c2 := &Credential{Handle: c.Handle, Type: "card", Label: "joan", Metadata: `{"v":2}`, Ciphertext: []byte("ct2")}
+	if err := s.AddCredential(c2); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err = s.GetCredential(c.Handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "card" || string(got.Ciphertext) != "ct2" || got.Metadata != `{"v":2}` {
+		t.Fatalf("upsert did not replace: %+v", got)
+	}
+}
+
+func TestDeleteCredential(t *testing.T) {
+	s := tempStore(t)
+	c := &Credential{Handle: "card://personal", Type: "card", Label: "personal", Metadata: "{}", Ciphertext: []byte("ct")}
+	if err := s.AddCredential(c); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteCredential(c.Handle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetCredential(c.Handle); err != ErrNotFound {
+		t.Fatalf("want ErrNotFound after delete, got %v", err)
+	}
+	if err := s.DeleteCredential("card://nope"); err != ErrNotFound {
+		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
 

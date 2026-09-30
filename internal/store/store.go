@@ -87,6 +87,7 @@ type Store interface {
 	AddCredential(c *Credential) error
 	GetCredential(h string) (*Credential, error)
 	ListCredentials() ([]Credential, error)
+	DeleteCredential(h string) error
 
 	CreateAgent(name, tokenHash string) (*Agent, error)
 	GetAgentByTokenHash(h string) (*Agent, error)

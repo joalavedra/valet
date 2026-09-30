@@ -191,7 +191,12 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 		delete(a.pending, convID)
 		a.mu.Unlock()
 	}
-	out, err := a.valet.requestGrant(ctx, "card://"+a.cfg.CardLabel, purpose, 600, 1, pol)
+	label := a.cardLabel()
+	if label == "" {
+		clearPending()
+		return map[string]any{"status": "error", "reason": "no card saved — add one in the Wallet tab"}
+	}
+	out, err := a.valet.requestGrant(ctx, "card://"+label, purpose, 600, 1, pol)
 	if err != nil {
 		clearPending()
 		return map[string]any{"status": "error", "reason": "grant request failed"}
