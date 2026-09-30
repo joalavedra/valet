@@ -41,6 +41,7 @@ import (
 	"github.com/joalavedra/valet/internal/store"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/x402-foundation/x402/go/mechanisms/evm"
+	"github.com/x402-foundation/x402/go/mechanisms/svm"
 )
 
 // Server holds dependencies for the HTTP API.
@@ -909,7 +910,7 @@ func (s *Server) SetCardProvider(p card.Provider) { s.cardProv = p }
 var walletFetch = wallet.Fetch
 
 // SetWalletFetcher overrides the x402 fetch implementation (used by tests).
-func (s *Server) SetWalletFetcher(f func(context.Context, evm.ClientEvmSigner, wallet.Request, wallet.Policy) (*wallet.Response, error)) {
+func (s *Server) SetWalletFetcher(f func(context.Context, wallet.Signers, wallet.Request, wallet.Policy) (*wallet.Response, error)) {
 	walletFetch = f
 }
 
@@ -942,15 +943,16 @@ type walletMeta struct {
 // Openfort client shared by the x402 and MPP payment edges. Callers
 // must defer unlock() and wipe(fields).
 type walletCallCtx struct {
-	g      *store.Grant
-	cred   *store.Credential
-	meta   walletMeta
-	fields map[string]string
-	of     *openfort.Client
-	pol    *policy.Policy
-	capAmt *big.Int
-	target string
-	unlock func()
+	g       *store.Grant
+	cred    *store.Credential
+	meta    walletMeta
+	fields  map[string]string
+	of      *openfort.Client
+	signers wallet.Signers
+	pol     *policy.Policy
+	capAmt  *big.Int
+	target  string
+	unlock  func()
 }
 
 // walletPrelude runs the common verification path for wallet payment
@@ -1071,9 +1073,35 @@ func (s *Server) walletPrelude(w http.ResponseWriter, r *http.Request, a *store.
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant total limit exceeded"})
 		return nil, false
 	}
+	// Build the chain signers. EVM always present (account_id checked
+	// above); SVM only when the credential carries an svm account pair.
+	signers := wallet.Signers{EVM: wallet.NewSigner(of, fields["account_id"], meta.Address)}
+	if fields["svm_account_id"] != "" {
+		sv, err := wallet.NewSvmSigner(of, fields["svm_account_id"], fields["svm_address"])
+		if err != nil {
+			wipeFields(fields)
+			slog.Debug("svm signer init failed", "error", err)
+			s.auditDeny(a.ID, g.Handle, "wallet", target, "wallet_error")
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet svm metadata incomplete"})
+			return nil, false
+		}
+		signers.SVM = sv
+	}
+	hasSolana := false
+	for _, n := range walletNetworks(meta.Network) {
+		if strings.HasPrefix(n, "solana:") {
+			hasSolana = true
+		}
+	}
+	if hasSolana && signers.SVM == nil {
+		wipeFields(fields)
+		s.auditDeny(a.ID, g.Handle, "wallet", target, "policy_denied")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet has no solana account"})
+		return nil, false
+	}
 	ok = true
 	return &walletCallCtx{
-		g: g, cred: cred, meta: meta, fields: fields, of: of,
+		g: g, cred: cred, meta: meta, fields: fields, of: of, signers: signers,
 		pol: &p, capAmt: capAmt, target: target, unlock: unlock,
 	}, true
 }
@@ -1128,6 +1156,8 @@ func walletAllowedAssets(nets []string, asset string) ([]string, bool) {
 			list = tempo.DefaultCurrenciesForChain(id)
 		} else if cfg, ok := evm.NetworkConfigs[n]; ok {
 			list = []string{cfg.DefaultAsset.Address}
+		} else if cfg, ok := svm.NetworkConfigs[n]; ok {
+			list = []string{cfg.DefaultAsset.Address}
 		} else {
 			return nil, false
 		}
@@ -1159,8 +1189,7 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
 		return
 	}
-	signer := wallet.NewSigner(c.of, c.fields["account_id"], c.meta.Address)
-	res, err := walletFetch(r.Context(), signer, wallet.Request{
+	res, err := walletFetch(r.Context(), c.signers, wallet.Request{
 		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
 	}, wallet.Policy{
 		MaxAmount: c.capAmt,

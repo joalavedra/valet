@@ -32,7 +32,6 @@ import (
 	"github.com/joalavedra/valet/internal/handle"
 	"github.com/joalavedra/valet/internal/store"
 	"github.com/tempoxyz/mpp-go/pkg/tempo"
-	"github.com/x402-foundation/x402/go/mechanisms/evm"
 )
 
 type fakeFiller struct {
@@ -1505,7 +1504,7 @@ func TestWalletX402(t *testing.T) {
 	orig := walletFetch
 	defer func() { walletFetch = orig }()
 	var gotPol wallet.Policy
-	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+	walletFetch = func(ctx context.Context, signers wallet.Signers, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
 		gotPol = pol
 		return &wallet.Response{
 			Status: 200, Headers: map[string]string{"content-type": "application/json"},
@@ -1607,7 +1606,7 @@ func TestWalletX402Denies(t *testing.T) {
 	// Fetch policy refusal maps to 403.
 	orig := walletFetch
 	defer func() { walletFetch = orig }()
-	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+	walletFetch = func(ctx context.Context, signers wallet.Signers, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
 		return nil, fmt.Errorf("%w: over cap", wallet.ErrPolicy)
 	}
 	rec = x402Req(t, srv, agentTok, map[string]any{
@@ -1623,7 +1622,7 @@ func TestWalletX402PaymentRejected(t *testing.T) {
 	addWalletCred(t, srv, st)
 	orig := walletFetch
 	defer func() { walletFetch = orig }()
-	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+	walletFetch = func(ctx context.Context, signers wallet.Signers, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
 		return &wallet.Response{Status: 402, PaymentAttempted: true}, nil
 	}
 	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
@@ -1893,7 +1892,7 @@ func TestWalletX402ConcurrentSpend(t *testing.T) {
 	addWalletCred(t, srv, st)
 	orig := walletFetch
 	defer func() { walletFetch = orig }()
-	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+	walletFetch = func(ctx context.Context, signers wallet.Signers, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
 		time.Sleep(20 * time.Millisecond) // widen the race
 		amt := "10"
 		if pol.MaxAmount != nil && pol.MaxAmount.Int64() < 10 {
@@ -2138,7 +2137,7 @@ func TestWalletNetworkListParses(t *testing.T) {
 	orig := walletFetch
 	defer func() { walletFetch = orig }()
 	var gotPol wallet.Policy
-	walletFetch = func(ctx context.Context, s evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+	walletFetch = func(ctx context.Context, signers wallet.Signers, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
 		gotPol = pol
 		return &wallet.Response{Status: 200}, nil
 	}
@@ -2156,5 +2155,106 @@ func TestWalletNetworkListParses(t *testing.T) {
 	// USDC on 84532 + pathUSD/OUSD on 42431.
 	if len(gotPol.Assets) != 3 {
 		t.Fatalf("assets %v", gotPol.Assets)
+	}
+}
+
+func addWalletCredSvm(t *testing.T, srv *Server, st *store.SQLite, handle_, network string, svm bool) {
+	t.Helper()
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(k)
+	fields := map[string]string{
+		"secret_key": "sk_test_x", "wallet_secret": base64.StdEncoding.EncodeToString(der), "account_id": "acc_x",
+	}
+	if svm {
+		fields["svm_account_id"] = "acc_svm_x"
+		fields["svm_address"] = "FDx9mfVqTvXUaSPQDELwDtGgMqxirmAFsEK2s4YsKfsc"
+	}
+	pt, _ := json.Marshal(fields)
+	ct, err := crypto.Encrypt(srv.dek, pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := json.Marshal(map[string]string{
+		"provider": "openfort", "address": "0xabc", "network": network, "asset": "USDC",
+	})
+	if err := st.AddCredential(&store.Credential{
+		Handle: handle_, Type: "wallet", Label: handle_, Metadata: string(meta), Ciphertext: ct,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWalletX402Solana(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCredSvm(t, srv, st, "wallet://sol", "eip155:84532,solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", true)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	var gotSigners wallet.Signers
+	var gotPol wallet.Policy
+	walletFetch = func(ctx context.Context, signers wallet.Signers, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		gotSigners = signers
+		gotPol = pol
+		return &wallet.Response{Status: 200, PaymentAttempted: true, Payment: &wallet.PaymentInfo{
+			Network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", Asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+			PayTo: "FDx9mfVqTvXUaSPQDELwDtGgMqxirmAFsEK2s4YsKfsc", Amount: "10000", Transaction: "5tx",
+		}}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://sol",
+		`{"hosts":["api.example.com"],"spend":{"total":50000}}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if gotSigners.SVM == nil || gotSigners.EVM == nil {
+		t.Fatal("both signers expected")
+	}
+	var netsOK, assetOK bool
+	for _, n := range gotPol.Networks {
+		if n == "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1" {
+			netsOK = true
+		}
+	}
+	for _, a := range gotPol.Assets {
+		if strings.EqualFold(a, "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU") {
+			assetOK = true
+		}
+	}
+	if !netsOK || !assetOK {
+		t.Fatalf("bad policy networks=%v assets=%v", gotPol.Networks, gotPol.Assets)
+	}
+	g, err := st.GetGrant(strings.SplitN(tok, ".", 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Uses != 1 || g.Spent != 10000 {
+		t.Fatalf("grant uses=%d spent=%d", g.Uses, g.Spent)
+	}
+}
+
+func TestWalletX402SolanaMissingSVM(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCredSvm(t, srv, st, "wallet://solonly", "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", false)
+	called := false
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = func(ctx context.Context, signers wallet.Signers, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		called = true
+		return &wallet.Response{Status: 200}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://solonly",
+		`{"hosts":["api.example.com"]}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x", "method": "GET",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("want 403 got %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "no solana account") {
+		t.Fatalf("wrong error %s", rec.Body)
+	}
+	if called {
+		t.Fatal("fetch called despite missing svm account")
 	}
 }
