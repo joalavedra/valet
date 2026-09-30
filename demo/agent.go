@@ -191,7 +191,11 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 		delete(a.pending, convID)
 		a.mu.Unlock()
 	}
-	label := a.cardLabel()
+	label, _, err := a.resolveCard(ctx)
+	if err != nil {
+		clearPending()
+		return map[string]any{"status": "error", "reason": "wallet lookup failed"}
+	}
 	if label == "" {
 		clearPending()
 		return map[string]any{"status": "error", "reason": "no card saved — add one in the Wallet tab"}

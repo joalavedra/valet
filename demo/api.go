@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -8,52 +9,67 @@ import (
 	"strings"
 )
 
+// cardInfo is the wallet's view of one card:// handle.
+type cardInfo struct {
+	Handle   string `json:"handle"`
+	Label    string `json:"label"`
+	Last4    string `json:"last4"`
+	Bin      string `json:"bin"`
+	Verified bool   `json:"verified"`
+}
+
+// resolveCard lists card handles and resolves the effective checkout label:
+// a.defaultCard while it exists, else the first remaining card, else "".
+func (a *app) resolveCard(ctx context.Context) (string, []cardInfo, error) {
+	h, err := a.valet.ownerList(ctx, "/v1/owner/handles")
+	if err != nil {
+		return "", nil, err
+	}
+	cards := []cardInfo{}
+	if handles, ok := h["handles"].([]any); ok {
+		for _, x := range handles {
+			m, _ := x.(map[string]any)
+			hdl, _ := m["handle"].(string)
+			label, ok := strings.CutPrefix(hdl, "card://")
+			if !ok {
+				continue
+			}
+			var meta struct {
+				Last4       string `json:"last4"`
+				Bin         string `json:"bin"`
+				Last4Source string `json:"last4_source"`
+			}
+			if s, ok := m["metadata"].(string); ok {
+				json.Unmarshal([]byte(s), &meta)
+			}
+			cards = append(cards, cardInfo{
+				Handle: hdl, Label: label, Last4: meta.Last4,
+				Bin: meta.Bin, Verified: meta.Last4Source == "vgs",
+			})
+		}
+	}
+	def := a.cardLabel()
+	found := false
+	for _, c := range cards {
+		if c.Label == def {
+			found = true
+		}
+	}
+	if !found {
+		def = ""
+		if len(cards) > 0 {
+			def = cards[0].Label
+		}
+	}
+	return def, cards, nil
+}
+
 func (a *app) stateHandler(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"card_saved": false, "cards": []any{}, "pending_approvals": []any{}, "grants": []any{}, "audit": []any{}, "orders": []any{}}
-	if h, err := a.valet.ownerList(r.Context(), "/v1/owner/handles"); err == nil {
-		if handles, ok := h["handles"].([]any); ok {
-			cards := []any{}
-			for _, x := range handles {
-				m, _ := x.(map[string]any)
-				hdl, _ := m["handle"].(string)
-				label, ok := strings.CutPrefix(hdl, "card://")
-				if !ok {
-					continue
-				}
-				var meta struct {
-					Last4       string `json:"last4"`
-					Bin         string `json:"bin"`
-					Last4Source string `json:"last4_source"`
-				}
-				if s, ok := m["metadata"].(string); ok {
-					json.Unmarshal([]byte(s), &meta)
-				}
-				cards = append(cards, map[string]any{
-					"handle": hdl, "label": label, "last4": meta.Last4,
-					"bin": meta.Bin, "verified": meta.Last4Source == "vgs",
-				})
-			}
-			out["cards"] = cards
-			out["card_saved"] = len(cards) > 0
-			// Default card: the configured/selected label while it exists,
-			// else the first remaining card.
-			def := a.cardLabel()
-			found := false
-			for _, c := range cards {
-				if m, _ := c.(map[string]any); m["label"] == def {
-					found = true
-				}
-			}
-			if !found {
-				def = ""
-				if len(cards) > 0 {
-					if m, _ := cards[0].(map[string]any); m != nil {
-						def, _ = m["label"].(string)
-					}
-				}
-			}
-			out["default_card"] = def
-		}
+	if def, cards, err := a.resolveCard(r.Context()); err == nil {
+		out["cards"] = cards
+		out["card_saved"] = len(cards) > 0
+		out["default_card"] = def
 	}
 	if ap, err := a.valet.ownerList(r.Context(), "/v1/owner/approvals?status=pending"); err == nil {
 		out["pending_approvals"] = ap["approvals"]
