@@ -27,6 +27,7 @@ import (
 	tempotx "github.com/tempoxyz/tempo-go/pkg/transaction"
 
 	"github.com/joalavedra/valet/internal/edge/egress"
+	"github.com/joalavedra/valet/internal/edge/netguard"
 	"github.com/joalavedra/valet/internal/edge/wallet"
 )
 
@@ -64,6 +65,9 @@ type Policy struct {
 	// ChainAssets, when non-nil, constrains allowed currencies per chain
 	// (denies a chain absent from the map outright). Falls back to Assets.
 	ChainAssets map[int64][]string
+	// AllowPrivate permits dialing non-publicly-routable upstreams
+	// (loopback, RFC1918, link-local). Default false = SSRF hard fence.
+	AllowPrivate bool
 }
 
 // paidInfo records what a credential paid for, for the receipt.
@@ -156,6 +160,9 @@ func (m *Method) checkPolicy(challenge *mpp.Challenge) error {
 	if !ok {
 		return fmt.Errorf("bad amount %q", request.Amount)
 	}
+	if amount.Sign() < 0 {
+		return fmt.Errorf("negative amount %q", request.Amount)
+	}
 	if amount.Sign() > 0 && m.pol.MaxAmount != nil && amount.Cmp(m.pol.MaxAmount) > 0 {
 		return fmt.Errorf("amount %s exceeds cap %s", amount, m.pol.MaxAmount)
 	}
@@ -193,6 +200,9 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	addr := m.signer.Address()
 	amount, _ := new(big.Int).SetString(request.Amount, 10) // checked in checkPolicy
 	if amount != nil && amount.Sign() == 0 {
+		if !request.Allows(tempo.CredentialTypeProof) {
+			return nil, fmt.Errorf("%w: challenge does not accept proof credentials", wallet.ErrPolicy)
+		}
 		signature, err := m.signProof(ctx, chainID, challenge.ID, challenge.Realm)
 		if err != nil {
 			return nil, err
@@ -474,9 +484,17 @@ func chainAllowed(ids []int64, id int64) bool {
 	return false
 }
 
+// matchFold compares case-insensitively only for 0x-prefixed hex
+// (EVM addresses); everything else is exact — base58 Solana addresses
+// are case-sensitive.
 func matchFold(list []string, v string) bool {
 	for _, it := range list {
-		if strings.EqualFold(strings.TrimSpace(it), v) {
+		it = strings.TrimSpace(it)
+		if strings.HasPrefix(it, "0x") || strings.HasPrefix(v, "0x") {
+			if strings.EqualFold(it, v) {
+				return true
+			}
+		} else if it == v {
 			return true
 		}
 	}
@@ -497,7 +515,7 @@ func Fetch(ctx context.Context, signer HashSigner, req wallet.Request, pol Polic
 	}
 	method := NewMethod(signer, pol, rpc)
 
-	tr := client.NewTransport([]client.Method{method}, http.DefaultTransport)
+	tr := client.NewTransport([]client.Method{method}, netguard.Transport(pol.AllowPrivate))
 	hc := &http.Client{Timeout: 30 * time.Second, Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
@@ -537,6 +555,10 @@ func Fetch(ctx context.Context, signer HashSigner, req wallet.Request, pol Polic
 	resp, err := hc.Do(hreq)
 	if err != nil {
 		if errors.Is(err, wallet.ErrPolicy) {
+			return nil, fmt.Errorf("%w: %s", wallet.ErrPolicy, wallet.ScrubErr(err))
+		}
+		// Blocked upstreams fail before any challenge → no credential.
+		if errors.Is(err, netguard.ErrBlocked) {
 			return nil, fmt.Errorf("%w: %s", wallet.ErrPolicy, wallet.ScrubErr(err))
 		}
 		// The credential was already sent and the conn died — the upstream

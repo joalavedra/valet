@@ -185,7 +185,7 @@ func TestFetchPaysV2(t *testing.T) {
 	defer srv.Close()
 	s := testSigner(t)
 	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL + "/data"},
-		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
+		Policy{AllowPrivate: true, Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestFetchPassthrough(t *testing.T) {
 	defer srv.Close()
 	s := testSigner(t)
 	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
-		Policy{Networks: []string{testNet}})
+		Policy{AllowPrivate: true, Networks: []string{testNet}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,11 +223,11 @@ func TestFetchDenies(t *testing.T) {
 		mut  func(*x402.PaymentRequirements)
 		pol  Policy
 	}{
-		{"network", func(r *x402.PaymentRequirements) { r.Network = "eip155:1" }, Policy{Networks: []string{testNet}}},
-		{"payTo", func(r *x402.PaymentRequirements) { r.PayTo = "0x9999999999999999999999999999999999999999" }, Policy{Networks: []string{testNet}, PayTo: []string{testPayTo}}},
-		{"asset", func(r *x402.PaymentRequirements) { r.Asset = "0xdead" }, Policy{Networks: []string{testNet}, Assets: []string{testAsset}}},
-		{"amount", nil, Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(500)}},
-		{"scheme", func(r *x402.PaymentRequirements) { r.Scheme = "upto" }, Policy{Networks: []string{testNet}}},
+		{"network", func(r *x402.PaymentRequirements) { r.Network = "eip155:1" }, Policy{AllowPrivate: true, Networks: []string{testNet}}},
+		{"payTo", func(r *x402.PaymentRequirements) { r.PayTo = "0x9999999999999999999999999999999999999999" }, Policy{AllowPrivate: true, Networks: []string{testNet}, PayTo: []string{testPayTo}}},
+		{"asset", func(r *x402.PaymentRequirements) { r.Asset = "0xdead" }, Policy{AllowPrivate: true, Networks: []string{testNet}, Assets: []string{testAsset}}},
+		{"amount", nil, Policy{AllowPrivate: true, Networks: []string{testNet}, MaxAmount: big.NewInt(500)}},
+		{"scheme", func(r *x402.PaymentRequirements) { r.Scheme = "upto" }, Policy{AllowPrivate: true, Networks: []string{testNet}}},
 	}
 	for _, tc := range cases {
 		srv := v2Server(t, "1000", tc.mut)
@@ -273,7 +273,7 @@ func TestFetchV1(t *testing.T) {
 	defer srv.Close()
 	s := testSigner(t)
 	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
-		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(1000)})
+		Policy{AllowPrivate: true, Networks: []string{testNet}, MaxAmount: big.NewInt(1000)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestFetchPaymentRejected(t *testing.T) {
 	defer srv.Close()
 	s := &countingSigner{inner: testSigner(t)}
 	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
-		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
+		Policy{AllowPrivate: true, Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +359,7 @@ func TestFetchLostReceiptCountsPaid(t *testing.T) {
 	defer srv.Close()
 	s := testSigner(t)
 	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
-		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
+		Policy{AllowPrivate: true, Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestFetchIgnoresSpoofedSettleHeader(t *testing.T) {
 	defer srv.Close()
 	s := testSigner(t)
 	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
-		Policy{Networks: []string{testNet}})
+		Policy{AllowPrivate: true, Networks: []string{testNet}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,9 +408,21 @@ func TestFetchStripsPaymentHeaders(t *testing.T) {
 			"Payment-Signature": "AAAA", "X-Payment": "AAAA", "Payment-Required": "x",
 			"Payment-Response": "x", "X-Payment-Response": "x",
 			"Authorization": "Bearer ok",
-		}}, Policy{Networks: []string{testNet}})
+		}}, Policy{AllowPrivate: true, Networks: []string{testNet}})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Private/loopback upstreams are refused before any request or signing.
+func TestFetchBlocksPrivateUpstream(t *testing.T) {
+	srv := v2Server(t, "1000")
+	defer srv.Close()
+	s := testSigner(t)
+	_, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL + "/data"},
+		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
+	if !errors.Is(err, ErrPolicy) || !strings.Contains(err.Error(), "not publicly routable") {
+		t.Fatalf("want ErrPolicy/not routable, got %v", err)
 	}
 }
 
@@ -441,7 +453,7 @@ func TestFetchConnClosedAfterSignature(t *testing.T) {
 	defer srv.Close()
 	s := testSigner(t)
 	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
-		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
+		Policy{AllowPrivate: true, Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,5 +465,53 @@ func TestFetchConnClosedAfterSignature(t *testing.T) {
 	}
 	if res.Status != 0 {
 		t.Fatalf("status %d", res.Status)
+	}
+}
+
+func TestMatchCINonHexIsExact(t *testing.T) {
+	// EVM hex folds case.
+	if !matchCI([]string{"0xABCD"}, "0xabcd") {
+		t.Fatal("0x address should match case-insensitively")
+	}
+	// Base58 Solana addresses are case-sensitive — folded match is a bug.
+	if matchCI([]string{"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"},
+		"4zmmc9srt5ri5x14gagxhahii3gnpaeerypjgzjdncdu") {
+		t.Fatal("base58 address matched after case folding")
+	}
+	if !matchCI([]string{"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"},
+		"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU") {
+		t.Fatal("base58 exact match failed")
+	}
+}
+
+// A network-scoped asset map must deny an asset that defaults on a
+// different chain — merged Assets lists can't express that.
+func TestFetchNetworkAssetsScopesPerChain(t *testing.T) {
+	otherChainUSDC := "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" // Base mainnet
+	srv := v2Server(t, "1000", func(r *x402.PaymentRequirements) {
+		r.Asset = otherChainUSDC
+	})
+	defer srv.Close()
+	s := &countingSigner{inner: testSigner(t)}
+	_, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL}, Policy{
+		AllowPrivate: true, Networks: []string{testNet},
+		Assets:        []string{testAsset, strings.ToLower(otherChainUSDC)}, // merged list would allow it
+		NetworkAssets: map[string][]string{testNet: {testAsset}},
+	})
+	if !errors.Is(err, ErrPolicy) {
+		t.Fatalf("want ErrPolicy, got %v", err)
+	}
+	if s.calls != 0 {
+		t.Fatalf("signer called %d times", s.calls)
+	}
+	// Same offer with the correct asset pays.
+	srv2 := v2Server(t, "1000")
+	defer srv2.Close()
+	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv2.URL}, Policy{
+		AllowPrivate: true, Networks: []string{testNet},
+		NetworkAssets: map[string][]string{testNet: {testAsset}},
+	})
+	if err != nil || res.Payment == nil {
+		t.Fatalf("expected payment, got %v %+v", err, res)
 	}
 }

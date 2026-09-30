@@ -12,9 +12,11 @@ services:
       VALET_OWNER_TOKEN: ${VALET_OWNER_TOKEN}
       VALET_PUBLIC_URL: ${VALET_PUBLIC_URL:-}
       VALET_CAPTURE_RETURN_ORIGINS: ${DEMO_PUBLIC_URL}
-      VALET_REQUIRE_APPROVAL: card
+      VALET_REQUIRE_APPROVAL: card,wallet
       VALET_APPROVAL_TTL: 10m
       VALET_CDP_URL: ""
+      # demo services live on the compose network
+      VALET_ALLOW_PRIVATE_UPSTREAMS: "1"
       VGS_VAULT_ID: ${VGS_VAULT_ID:-}
       VGS_ENV: ${VGS_ENV:-sandbox}
       VGS_USERNAME: ${VGS_USERNAME:-}
@@ -63,6 +65,9 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       DEMO_CARD_LABEL: ${DEMO_CARD_LABEL:-personal}
+      DEMO_PAY_TO: ${DEMO_PAY_TO:-}
+      DEMO_WALLET_LABEL: ${DEMO_WALLET_LABEL:-openfort}
+      DEMO_MPP_SECRET: ${DEMO_MPP_SECRET:-}
       DEMO_STATE_FILE: /state/demo-state.json
     volumes:
       - valet-data:/data:ro

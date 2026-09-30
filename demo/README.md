@@ -51,9 +51,12 @@ Then in chat: "Buy the coffee beans" → approve the bottom-sheet → receipt.
 | `VALET_OWNER_TOKEN` | owner API token (approvals/captures) |
 | `VALET_MASTER_PASSWORD` | valet DEK password |
 | `VALET_PUBLIC_URL` | public valet base — `DEMO_PUBLIC_URL + /valet` |
-| `VALET_REQUIRE_APPROVAL` | `card` (compose default) — makes `card://` grants human-approved |
+| `VALET_REQUIRE_APPROVAL` | `card,wallet` (compose default) — makes `card://` and `wallet://` grants human-approved |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | Gemini REST (default `gemini-2.5-flash`) |
 | `DEMO_CARD_LABEL` | initial default card handle label (default `personal`) |
+| `DEMO_PAY_TO` | EVM address that receives crypto payments — unset hides the premium product |
+| `DEMO_WALLET_LABEL` | `wallet://` label in Valet (default `openfort`) |
+| `DEMO_MPP_SECRET` | MPP realm secret (default: random per boot) |
 | `VALET_CAPTURE_RETURN_ORIGINS` | origins allowed as capture `return_url` (compose sets `DEMO_PUBLIC_URL`) |
 | `VGS_CLIENT_ID`/`VGS_CLIENT_SECRET` | service-account OAuth for tokenize + `vgs-route.sh` |
 | `VGS_USERNAME`/`VGS_PASSWORD` | vault access credentials — the outbound proxy auth Valet uses for payments |
@@ -66,6 +69,37 @@ Then in chat: "Buy the coffee beans" → approve the bottom-sheet → receipt.
 3. Agent → `POST /v1/edge/card/pay` with `{{card.number}}`/`{{card.cvc}}` placeholders in the checkout body — Valet swaps in VGS aliases.
 4. The request egresses through the VGS outbound proxy → `valet-demo-store` route reveals `$.card.number`/`$.card.cvc` → real PAN reaches the store.
 5. Store Luhn-checks, records the order, returns `{order_id,status:"paid",last4}`.
+
+## Crypto rails
+
+With `DEMO_PAY_TO` set, the catalog gains a crypto-priced product
+("Agent Commerce Market Report", 📊) that can't be card-checkout'ed — the
+agent must call `buy_with_wallet(product_id, rail)`:
+
+- `GET /store/premium/report` — gated by x402 `exact`, $0.01 USDC on
+  Base Sepolia (`eip155:84532`) via `https://x402.org/facilitator`.
+- `GET /store/premium/report/mpp` — gated by MPP `tempo/charge`, 0.01
+  pathUSD on Tempo Moderato (`eip155:42431`, RPC
+  `https://rpc.moderato.tempo.xyz`).
+
+Both run through the same `wallet://` handle in Valet — grant → phone
+approval → `/v1/edge/wallet/{x402,mpp}` — with the same spend caps and
+audit entries as any other edge. Register the wallet once (inside the
+`valet` container, or against `VALET_DB`):
+
+```
+valet cred add --type wallet --label openfort \
+  --network eip155:84532,eip155:42431
+# prompts: secret_key (Openfort sk_…), wallet_secret, account_id (acc_…),
+#          svm_account_id + svm_address (optional, for Solana rails)
+```
+
+Fund the Openfort account: USDC on Base Sepolia via
+https://faucet.circle.com, pathUSD/OUSD on Tempo Moderato via the
+`tempo_fundAddress` JSON-RPC method on `https://rpc.moderato.tempo.xyz`.
+`VALET_ALLOW_PRIVATE_UPSTREAMS=1` is not needed for these public
+endpoints, but compose sets it anyway (the card store is on the compose
+network).
 
 ## Limitations
 
