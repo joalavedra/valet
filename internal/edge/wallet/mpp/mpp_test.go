@@ -99,7 +99,7 @@ func testChallenge(t *testing.T, reqMap map[string]any) *mpp.Challenge {
 
 func defaultPolicy() Policy {
 	return Policy{ChainIDs: []int64{testChain}, Assets: []string{strings.ToLower(currency)},
-		PayTo: []string{strings.ToLower(payee.Hex())}, MaxAmount: big.NewInt(100000)}
+		PayTo: []string{strings.ToLower(payee.Hex())}, MaxAmount: big.NewInt(100000), AllowPrivate: true}
 }
 
 // decodeCredTx parses the credential's serialized transaction, verifies
@@ -535,5 +535,45 @@ func TestChainAssetsScopesPerChain(t *testing.T) {
 	ch2 := testChallenge(t, chargeMap("0.01", currency, payee.Hex(), testChain))
 	if _, err := m2.CreateCredential(context.Background(), ch2); !errors.Is(err, wallet.ErrPolicy) {
 		t.Fatalf("want ErrPolicy for unlisted chain, got %v", err)
+	}
+}
+
+// Private/loopback upstreams are refused before any request or signing.
+func TestFetchBlocksPrivateUpstream(t *testing.T) {
+	s := newTestSigner(t)
+	srv := mppServer(t, s, chargeMap("0.01", currency, payee.Hex(), testChain))
+	defer srv.Close()
+	pol := defaultPolicy()
+	pol.AllowPrivate = false
+	_, err := Fetch(context.Background(), s, wallet.Request{Method: "GET", URL: srv.URL},
+		pol, &fakeRPC{chainID: uint64(testChain)})
+	if !errors.Is(err, wallet.ErrPolicy) || !strings.Contains(err.Error(), "not publicly routable") {
+		t.Fatalf("want ErrPolicy/not routable, got %v", err)
+	}
+	if s.callCount() != 0 {
+		t.Fatal("signer called on blocked upstream")
+	}
+}
+
+func TestNegativeAmountDenied(t *testing.T) {
+	s := newTestSigner(t)
+	m := NewMethod(s, defaultPolicy(), &fakeRPC{chainID: uint64(testChain)})
+	req := chargeMap("0", currency, payee.Hex(), testChain)
+	req["amount"] = "-1"
+	_, err := m.CreateCredential(context.Background(), testChallenge(t, req))
+	if !errors.Is(err, wallet.ErrPolicy) {
+		t.Fatalf("want ErrPolicy, got %v", err)
+	}
+	if s.callCount() != 0 {
+		t.Fatal("signer called on negative amount")
+	}
+}
+
+func TestMatchFoldNonHexIsExact(t *testing.T) {
+	if !matchFold([]string{"0xABCD"}, "0xabcd") {
+		t.Fatal("0x address should match case-insensitively")
+	}
+	if matchFold([]string{"ABCdef"}, "abcdef") {
+		t.Fatal("non-hex string matched after case folding")
 	}
 }

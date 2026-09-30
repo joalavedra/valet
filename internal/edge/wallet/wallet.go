@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/joalavedra/valet/internal/edge/egress"
+	"github.com/joalavedra/valet/internal/edge/netguard"
 	"github.com/joalavedra/valet/internal/edge/wallet/openfort"
 )
 
@@ -156,6 +157,13 @@ type Policy struct {
 	Networks  []string // allowed CAIP-2 networks, e.g. "eip155:84532"; empty = deny all
 	Assets    []string // allowed asset contract addresses (lowercase); empty = any
 	PayTo     []string // allowed recipients (lowercase); empty = any
+	// NetworkAssets scopes the asset allowlist per CAIP-2 network. When
+	// non-nil it replaces Assets: a requirement is denied when its
+	// network is absent or its asset is not in that network's list.
+	NetworkAssets map[string][]string
+	// AllowPrivate permits dialing non-publicly-routable upstreams
+	// (loopback, RFC1918, link-local). Default false = SSRF hard fence.
+	AllowPrivate bool
 }
 
 // Request is one HTTP request the edge makes on the agent's behalf.
@@ -224,10 +232,16 @@ func Fetch(ctx context.Context, signers Signers, req Request, pol Policy) (*Resp
 			if v.GetScheme() != "exact" {
 				continue
 			}
-			if !matchCI(pol.Networks, caip2(v.GetNetwork())) {
+			net := caip2(v.GetNetwork())
+			if !matchCI(pol.Networks, net) {
 				continue
 			}
-			if len(pol.Assets) > 0 && !matchCI(pol.Assets, v.GetAsset()) {
+			if pol.NetworkAssets != nil {
+				list, ok := pol.NetworkAssets[net]
+				if !ok || !matchCI(list, v.GetAsset()) {
+					continue
+				}
+			} else if len(pol.Assets) > 0 && !matchCI(pol.Assets, v.GetAsset()) {
 				continue
 			}
 			if len(pol.PayTo) > 0 && !matchCI(pol.PayTo, v.GetPayTo()) {
@@ -271,6 +285,7 @@ func Fetch(ctx context.Context, signers Signers, req Request, pol Policy) (*Resp
 	hc := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
+	hc.Transport = netguard.Transport(pol.AllowPrivate)
 	x402http.WrapHTTPClientWithPayment(hc, x402http.Newx402HTTPClient(client))
 
 	method := strings.ToUpper(req.Method)
@@ -303,6 +318,11 @@ func Fetch(ctx context.Context, signers Signers, req Request, pol Policy) (*Resp
 	if err != nil {
 		var pe *x402.PaymentError
 		if errors.As(err, &pe) {
+			return nil, fmt.Errorf("%w: %s", ErrPolicy, ScrubErr(err))
+		}
+		// A blocked dial sent nothing — check before the paid-lost
+		// branch so it is never counted as spend.
+		if errors.Is(err, netguard.ErrBlocked) {
 			return nil, fmt.Errorf("%w: %s", ErrPolicy, ScrubErr(err))
 		}
 		// The payment signature was already sent and the conn died — the
@@ -395,9 +415,17 @@ func caip2(network string) string {
 	return network
 }
 
+// matchCI compares case-insensitively only for 0x-prefixed hex (EVM
+// addresses); everything else is exact — base58 Solana addresses are
+// case-sensitive.
 func matchCI(list []string, v string) bool {
 	for _, it := range list {
-		if strings.EqualFold(strings.TrimSpace(it), v) {
+		it = strings.TrimSpace(it)
+		if strings.HasPrefix(it, "0x") || strings.HasPrefix(v, "0x") {
+			if strings.EqualFold(it, v) {
+				return true
+			}
+		} else if it == v {
 			return true
 		}
 	}

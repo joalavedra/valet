@@ -15,6 +15,8 @@ services:
       VALET_REQUIRE_APPROVAL: card
       VALET_APPROVAL_TTL: 10m
       VALET_CDP_URL: ""
+      # demo services live on the compose network
+      VALET_ALLOW_PRIVATE_UPSTREAMS: "1"
       VGS_VAULT_ID: ${VGS_VAULT_ID:-}
       VGS_ENV: ${VGS_ENV:-sandbox}
       VGS_USERNAME: ${VGS_USERNAME:-}

@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -88,6 +90,11 @@ var credAddCmd = &cobra.Command{
 		for _, f := range prompts {
 			v, err := promptSecret(f)
 			if err != nil {
+				// Optional prompts end on EOF so piped scripts that
+				// stop after the required lines still work.
+				if errors.Is(err, io.EOF) && strings.Contains(f, "(optional)") {
+					break
+				}
 				return err
 			}
 			if v != "" {

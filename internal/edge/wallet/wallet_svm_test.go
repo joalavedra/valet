@@ -251,7 +251,7 @@ func TestFetchPaysSolanaDevnet(t *testing.T) {
 	defer srv.Close()
 	res, err := Fetch(context.Background(), Signers{SVM: s, SvmRPC: rpc.URL},
 		Request{Method: "GET", URL: srv.URL + "/data"},
-		Policy{Networks: []string{solDevnet}, Assets: []string{solUSDC}, MaxAmount: big.NewInt(50000)})
+		Policy{AllowPrivate: true, Networks: []string{solDevnet}, Assets: []string{solUSDC}, MaxAmount: big.NewInt(50000)})
 	if err != nil {
 		t.Fatal(err)
 	}

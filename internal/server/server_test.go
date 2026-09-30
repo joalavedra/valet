@@ -2021,6 +2021,59 @@ func TestOwnerGrantsSpentAndActive(t *testing.T) {
 	}
 }
 
+// The wallet edge refuses non-public upstreams by default → 403, no
+// grant use or spend.
+func TestWalletX402BlocksPrivateUpstream(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = wallet.Fetch // real edge
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["127.0.0.1","localhost"],"spend":{"total":2000}}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": upstream.URL + "/x", "method": "GET",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("want 403 got %d %s", rec.Code, rec.Body)
+	}
+	g, err := st.GetGrant(strings.SplitN(tok, ".", 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Uses != 0 || g.Spent != 0 {
+		t.Fatalf("uses=%d spent=%d", g.Uses, g.Spent)
+	}
+}
+
+func TestWalletX402AllowPrivateEnv(t *testing.T) {
+	t.Setenv("VALET_ALLOW_PRIVATE_UPSTREAMS", "1")
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	var gotPol wallet.Policy
+	walletFetch = func(ctx context.Context, signers wallet.Signers, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		gotPol = pol
+		return &wallet.Response{Status: 200}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"]}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if !gotPol.AllowPrivate {
+		t.Fatal("AllowPrivate not propagated")
+	}
+}
+
 func addWalletCredNet(t *testing.T, srv *Server, st *store.SQLite, handle_, network string) {
 	t.Helper()
 	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -2322,5 +2375,60 @@ func TestWalletX402LostResponseStillCounts(t *testing.T) {
 	}
 	if g.Uses != 1 || g.Spent != 700 {
 		t.Fatalf("uses=%d spent=%d", g.Uses, g.Spent)
+	}
+}
+
+// The MPP edge refuses non-public upstreams by default → 403, no spend.
+func TestWalletMPPBlocksPrivateUpstream(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCredNet(t, srv, st, "wallet://agent", "eip155:42431")
+	orig := mppFetch
+	defer func() { mppFetch = orig }()
+	mppFetch = mppedg.Fetch // real edge
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["127.0.0.1","localhost"],"spend":{"total":2000}}`, time.Hour)
+	rec := mppReq(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": upstream.URL + "/x", "method": "GET",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("want 403 got %d %s", rec.Code, rec.Body)
+	}
+	g, err := st.GetGrant(strings.SplitN(tok, ".", 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Uses != 0 || g.Spent != 0 {
+		t.Fatalf("uses=%d spent=%d", g.Uses, g.Spent)
+	}
+}
+
+func TestWalletNetworkAssetsPerNetwork(t *testing.T) {
+	nets := []string{"eip155:84532", "eip155:42431"}
+	m, ok := walletNetworkAssets(nets, "")
+	if !ok || len(m["eip155:84532"]) == 0 || len(m["eip155:42431"]) == 0 {
+		t.Fatalf("bad map: %v", m)
+	}
+	// Scoped per network: sepolia's USDC must not appear under Moderato.
+	for _, a := range m["eip155:42431"] {
+		for _, b := range m["eip155:84532"] {
+			if a == b {
+				t.Fatalf("asset %s shared across networks", a)
+			}
+		}
+	}
+	// Explicit 0x asset applies to every network.
+	m2, ok := walletNetworkAssets(nets, "0xABCDEF0000000000000000000000000000000001")
+	if !ok || m2["eip155:84532"][0] != "0xabcdef0000000000000000000000000000000001" ||
+		m2["eip155:42431"][0] != "0xabcdef0000000000000000000000000000000001" {
+		t.Fatalf("explicit asset not applied: %v", m2)
+	}
+	// Solana default mint is not case-folded.
+	m3, ok := walletNetworkAssets([]string{"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"}, "")
+	if !ok || m3["solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"][0] != "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" {
+		t.Fatalf("solana mint case-folded or missing: %v", m3)
 	}
 }
