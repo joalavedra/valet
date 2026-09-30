@@ -280,10 +280,26 @@ payment receipt.
 
 ```bash
 valet cred add --type wallet --label agent
-# prompts: secret_key, wallet_secret, account_id (optional)
+# prompts: secret_key, wallet_secret, account_id (optional),
+#          svm_account_id (optional), svm_address (optional)
 # leave account_id empty to create a new backend account, or pass
 # --address 0x.. --network eip155:84532 for an existing one
 ```
+
+The same `wallet://` label can also pay on Solana: create a second
+backend wallet with `chainType=SVM` in Openfort, then pass
+`--svm-account-id` + `--svm-address` and list the Solana CAIP-2 network:
+
+```bash
+valet cred add --type wallet --label agent --address 0x.. \
+  --svm-account-id acc_... --svm-address <base58> \
+  --network eip155:84532,solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1
+```
+
+For Solana the edge signs the transaction message via the SVM account
+and the facilitator's `feePayer` co-signs, so the wallet needs no SOL —
+only devnet USDC (https://faucet.circle.com). A credential that lists a
+`solana:` network without an SVM account is denied before any request.
 
 Grant it like a card (host scope is required):
 
