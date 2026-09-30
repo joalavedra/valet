@@ -118,5 +118,18 @@ var demoTools = []geminiToolDecl{{
 				"required": []string{"product_id"},
 			},
 		},
+		{
+			Name: "buy_with_wallet",
+			Description: "Pay a crypto-priced product (products with a rails field) from the user's Openfort wallet through Valet. " +
+				"x402 settles USDC on Base Sepolia; mpp settles pathUSD on Tempo Moderato. Needs the owner's approval on their phone.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"product_id": map[string]any{"type": "string", "description": "product id from list_products"},
+					"rail":       map[string]any{"type": "string", "enum": []string{"x402", "mpp"}, "description": "payment rail, default x402"},
+				},
+				"required": []string{"product_id"},
+			},
+		},
 	},
 }}

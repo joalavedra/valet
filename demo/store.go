@@ -8,20 +8,27 @@ import (
 )
 
 // product is a fixed catalog item — no DB, this is a demo store.
+// Rails lists the crypto rails a crypto-priced product accepts
+// ("x402", "mpp"); card products leave it empty.
 type product struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	PriceCents int64  `json:"price_cents"`
-	Currency   string `json:"currency"`
-	Emoji      string `json:"emoji"`
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	PriceCents int64    `json:"price_cents"`
+	Currency   string   `json:"currency"`
+	Emoji      string   `json:"emoji"`
+	Rails      []string `json:"rails,omitempty"`
 }
 
 type order struct {
-	ID         string      `json:"order_id"`
-	TotalCents int64       `json:"total_cents"`
-	Last4      string      `json:"last4"`
-	Items      []orderItem `json:"items"`
-	CreatedAt  time.Time   `json:"created_at"`
+	ID          string      `json:"order_id"`
+	TotalCents  int64       `json:"total_cents"`
+	Last4       string      `json:"last4"`
+	Items       []orderItem `json:"items"`
+	CreatedAt   time.Time   `json:"created_at"`
+	Rail        string      `json:"rail,omitempty"`
+	Network     string      `json:"network,omitempty"`
+	Tx          string      `json:"tx,omitempty"`
+	ExplorerURL string      `json:"explorer_url,omitempty"`
 }
 
 type orderItem struct {
@@ -34,15 +41,25 @@ type demoStore struct {
 	nextID   atomic.Int64
 }
 
-func newDemoStore() *demoStore {
-	return &demoStore{products: []product{
+// newDemoStore builds the catalog; the crypto-priced report exists only
+// when a payout address is configured (DEMO_PAY_TO).
+func newDemoStore(payTo string) *demoStore {
+	products := []product{
 		{ID: "coffee", Name: "Colombian coffee beans (250g)", PriceCents: 1800, Currency: "USD", Emoji: "☕"},
 		{ID: "sneakers", Name: "Running sneakers", PriceCents: 8900, Currency: "USD", Emoji: "👟"},
 		{ID: "headphones", Name: "Wireless headphones", PriceCents: 12900, Currency: "USD", Emoji: "🎧"},
 		{ID: "book", Name: "\"Designing Agent Systems\" (paperback)", PriceCents: 3400, Currency: "USD", Emoji: "📖"},
 		{ID: "flowers", Name: "Seasonal flower bouquet", PriceCents: 4200, Currency: "USD", Emoji: "💐"},
 		{ID: "ticket", Name: "Concert ticket — balcony", PriceCents: 7500, Currency: "USD", Emoji: "🎟️"},
-	}}
+	}
+	if payTo != "" {
+		products = append(products, product{
+			ID: "report", Name: "Agent Commerce Market Report (PDF)",
+			PriceCents: 1, Currency: "USDC", Emoji: "📊",
+			Rails: []string{"x402", "mpp"},
+		})
+	}
+	return &demoStore{products: products}
 }
 
 func (s *demoStore) byID(id string) *product {

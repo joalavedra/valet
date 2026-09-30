@@ -28,6 +28,9 @@ type config struct {
 	GeminiKey   string
 	GeminiModel string
 	CardLabel   string
+	PayTo       string // EVM address receiving crypto payments; "" hides the premium product
+	WalletLabel string // wallet:// label in Valet
+	MPPSecret   string // realm secret for the MPP payment server
 }
 
 type app struct {
@@ -51,6 +54,7 @@ type pendingApproval struct {
 	total     int
 	merchant  string
 	expiresAt string
+	rail      string // crypto rail for wallet buys ("" = card checkout)
 	reserved  bool
 }
 
@@ -64,6 +68,9 @@ func main() {
 		GeminiKey:   os.Getenv("GEMINI_API_KEY"),
 		GeminiModel: env("GEMINI_MODEL", "gemini-2.5-flash"),
 		CardLabel:   env("DEMO_CARD_LABEL", "personal"),
+		PayTo:       os.Getenv("DEMO_PAY_TO"),
+		WalletLabel: env("DEMO_WALLET_LABEL", "openfort"),
+		MPPSecret:   env("DEMO_MPP_SECRET", randomSecret()),
 	}
 	cfg.AgentToken = os.Getenv("VALET_AGENT_TOKEN")
 	if cfg.AgentToken == "" {
@@ -75,7 +82,7 @@ func main() {
 	}
 	a := &app{
 		cfg:         cfg,
-		store:       newDemoStore(),
+		store:       newDemoStore(cfg.PayTo),
 		valet:       newValetClient(cfg.ValetURL, cfg.AgentToken, cfg.OwnerToken),
 		convs:       map[string][]geminiContent{},
 		pending:     map[string]*pendingApproval{},
@@ -88,6 +95,11 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /store/products", a.productsHandler)
 	mux.HandleFunc("POST /store/checkout", a.checkoutHandler)
+	if cfg.PayTo != "" {
+		for pattern, h := range a.premiumHandlers() {
+			mux.Handle(pattern, h)
+		}
+	}
 	mux.HandleFunc("GET /api/orders", a.ordersHandler)
 	mux.HandleFunc("POST /api/chat", a.chatHandler)
 	mux.HandleFunc("GET /api/state", a.stateHandler)
