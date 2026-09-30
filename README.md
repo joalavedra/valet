@@ -4,6 +4,14 @@
 
 **Status: pre-alpha.** Design doc: [docs/DESIGN.md](docs/DESIGN.md).
 
+## Demo
+
+A Gemini shopping agent buys from a demo store with a card it never sees — VGS-vaulted card, human approval on the phone, PAN swapped in only on the outbound request.
+
+![Valet demo: chat → approval → receipt](docs/media/demo-checkout.webp)
+
+Run it yourself: [demo/README.md](demo/README.md).
+
 ## Architecture
 
 ```
@@ -46,6 +54,9 @@ Prebuilt binaries for Linux, macOS, and Windows are on the
 [GitHub Releases](https://github.com/joalavedra/valet/releases) page.
 
 ```bash
+# Homebrew (tap populated on the next release)
+brew install joalavedra/valet/valet
+
 export VALET_MASTER_PASSWORD="$(openssl rand -base64 24)"  # keep this; it is the owner credential
 
 # Docker (server on 127.0.0.1:14400, data in a named volume)
