@@ -160,6 +160,9 @@ func (m *Method) checkPolicy(challenge *mpp.Challenge) error {
 	if !ok {
 		return fmt.Errorf("bad amount %q", request.Amount)
 	}
+	if amount.Sign() < 0 {
+		return fmt.Errorf("negative amount %q", request.Amount)
+	}
 	if amount.Sign() > 0 && m.pol.MaxAmount != nil && amount.Cmp(m.pol.MaxAmount) > 0 {
 		return fmt.Errorf("amount %s exceeds cap %s", amount, m.pol.MaxAmount)
 	}
@@ -197,6 +200,9 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	addr := m.signer.Address()
 	amount, _ := new(big.Int).SetString(request.Amount, 10) // checked in checkPolicy
 	if amount != nil && amount.Sign() == 0 {
+		if !request.Allows(tempo.CredentialTypeProof) {
+			return nil, fmt.Errorf("%w: challenge does not accept proof credentials", wallet.ErrPolicy)
+		}
 		signature, err := m.signProof(ctx, chainID, challenge.ID, challenge.Realm)
 		if err != nil {
 			return nil, err
@@ -478,9 +484,17 @@ func chainAllowed(ids []int64, id int64) bool {
 	return false
 }
 
+// matchFold compares case-insensitively only for 0x-prefixed hex
+// (EVM addresses); everything else is exact — base58 Solana addresses
+// are case-sensitive.
 func matchFold(list []string, v string) bool {
 	for _, it := range list {
-		if strings.EqualFold(strings.TrimSpace(it), v) {
+		it = strings.TrimSpace(it)
+		if strings.HasPrefix(it, "0x") || strings.HasPrefix(v, "0x") {
+			if strings.EqualFold(it, v) {
+				return true
+			}
+		} else if it == v {
 			return true
 		}
 	}

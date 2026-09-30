@@ -104,3 +104,18 @@ func TestDialContextBlocksPrivate(t *testing.T) {
 		t.Fatal("allowPrivate dial never reached the listener")
 	}
 }
+
+func TestTransportCachedAndNoProxy(t *testing.T) {
+	a, b := Transport(false), Transport(false)
+	if a != b {
+		t.Fatal("transports not shared — each Fetch would leak an idle pool")
+	}
+	if c := Transport(true); c == a {
+		t.Fatal("allowPrivate transport shares the strict pool")
+	} else if c != Transport(true) {
+		t.Fatal("allowPrivate transport not cached")
+	}
+	if a.Proxy != nil {
+		t.Fatal("proxy set — env proxies could bypass the dial check")
+	}
+}

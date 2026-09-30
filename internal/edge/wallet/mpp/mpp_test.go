@@ -554,3 +554,26 @@ func TestFetchBlocksPrivateUpstream(t *testing.T) {
 		t.Fatal("signer called on blocked upstream")
 	}
 }
+
+func TestNegativeAmountDenied(t *testing.T) {
+	s := newTestSigner(t)
+	m := NewMethod(s, defaultPolicy(), &fakeRPC{chainID: uint64(testChain)})
+	req := chargeMap("0", currency, payee.Hex(), testChain)
+	req["amount"] = "-1"
+	_, err := m.CreateCredential(context.Background(), testChallenge(t, req))
+	if !errors.Is(err, wallet.ErrPolicy) {
+		t.Fatalf("want ErrPolicy, got %v", err)
+	}
+	if s.callCount() != 0 {
+		t.Fatal("signer called on negative amount")
+	}
+}
+
+func TestMatchFoldNonHexIsExact(t *testing.T) {
+	if !matchFold([]string{"0xABCD"}, "0xabcd") {
+		t.Fatal("0x address should match case-insensitively")
+	}
+	if matchFold([]string{"ABCdef"}, "abcdef") {
+		t.Fatal("non-hex string matched after case folding")
+	}
+}

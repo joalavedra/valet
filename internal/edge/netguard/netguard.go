@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sync"
 	"time"
 )
 
@@ -109,10 +110,31 @@ func DialContext(allowPrivate bool) func(ctx context.Context, network, addr stri
 	}
 }
 
-// Transport returns an http.Transport (clone of the default) whose dial
-// is gated by the routability check.
+// Transport returns an http.Transport whose dial is gated by the
+// routability check. Transports are cached per flag so callers share
+// connection pools. Proxy is nil — proxies would bypass the dial-time
+// check.
 func Transport(allowPrivate bool) *http.Transport {
+	if allowPrivate {
+		return transportFor(true)
+	}
+	return transportFor(false)
+}
+
+var (
+	transportMu sync.Mutex
+	transports  = map[bool]*http.Transport{}
+)
+
+func transportFor(allowPrivate bool) *http.Transport {
+	transportMu.Lock()
+	defer transportMu.Unlock()
+	if t := transports[allowPrivate]; t != nil {
+		return t
+	}
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.DialContext = DialContext(allowPrivate)
+	t.Proxy = nil
+	transports[allowPrivate] = t
 	return t
 }
