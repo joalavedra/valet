@@ -56,6 +56,7 @@ Prebuilt binaries for Linux, macOS, and Windows are on the
 ```bash
 # Homebrew (tap populated on the next release)
 brew install joalavedra/valet/valet
+# The binary is unsigned — the cask clears the macOS quarantine bit on install.
 
 export VALET_MASTER_PASSWORD="$(openssl rand -base64 24)"  # keep this; it is the owner credential
 

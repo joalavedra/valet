@@ -71,8 +71,16 @@ homebrew_casks:
     description: "Credential & payment broker for AI agents — handles in, secrets never out"
     license: Apache-2.0
     binaries: [valet]
-    # "auto" skips the upload when HOMEBREW_TAP_GITHUB_TOKEN is unset.
-    skip_upload: auto
+    # Unsigned binary: clear the Gatekeeper quarantine bit on install
+    # (per goreleaser docs; signing/notarizing needs a paid Apple ID).
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/valet"]
+          end
+    # Upload only when a tap token is present.
+    skip_upload: "{{ if index .Env \"HOMEBREW_TAP_GITHUB_TOKEN\" }}false{{ else }}true{{ end }}"
 
 docker_manifests:
   - name_template: "ghcr.io/joalavedra/valet:{{ .Version }}"
