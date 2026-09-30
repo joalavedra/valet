@@ -137,7 +137,7 @@ func (m *Method) checkPolicy(challenge *mpp.Challenge) error {
 		if !ok {
 			return fmt.Errorf("chain %d has no allowed assets", chainID)
 		}
-		if len(assets) > 0 && !matchFold(assets, request.Currency) {
+		if !matchFold(assets, request.Currency) {
 			return fmt.Errorf("currency %s not allowed on chain %d", request.Currency, chainID)
 		}
 	} else if len(m.pol.Assets) > 0 && !matchFold(m.pol.Assets, request.Currency) {
