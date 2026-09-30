@@ -81,6 +81,7 @@ func main() {
 		pending:     map[string]*pendingApproval{},
 		defaultCard: cfg.CardLabel,
 	}
+	a.loadState()
 	a.gemini = newGeminiClient(cfg.GeminiKey, cfg.GeminiModel)
 	a.agent = newChatAgent(a)
 

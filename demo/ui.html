@@ -222,10 +222,14 @@ async function loadWallet() {
   b.innerHTML = h + '</div>';
   const btn = $('addcard');
   if (btn) btn.onclick = async () => {
-    const n = (s.cards || []).length;
-    const label = prompt('Label for this card', n ? `card-${n + 1}` : 'personal');
-    if (label === null) return;
-    const r = await (await fetch('/api/card/capture', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label})})).json();
+    const used = new Set(cards.map(c => c.label));
+    let def = 'personal';
+    if (used.has(def)) { let n = 1; while (used.has(`card-${n}`)) n++; def = `card-${n}`; }
+    const label = prompt('Label for this card', def);
+    if (!label) return; // empty/cancel aborts — no implicit default
+    const res = await fetch('/api/card/capture', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label})});
+    const r = await res.json();
+    if (res.status === 409) { toast(r.error || 'label already in use'); return; }
     if (r.url) window.location = r.url; else toast(r.error || 'capture failed');
   };
 }

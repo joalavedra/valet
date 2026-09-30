@@ -226,3 +226,42 @@ func TestAgentCheckoutResolvesDefaultCard(t *testing.T) {
 		t.Fatalf("grant request made with no card: %q", got)
 	}
 }
+
+func TestCaptureHandlerRejectsUsedLabel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/owner/handles":
+			json.NewEncoder(w).Encode(map[string]any{"handles": []map[string]any{
+				{"handle": "card://personal", "metadata": `{"last4":"1111"}`},
+			}})
+		case "/v1/owner/captures":
+			json.NewEncoder(w).Encode(map[string]any{"url": "http://x/capture/t"})
+		}
+	}))
+	defer srv.Close()
+	a := testApp()
+	a.valet = newValetClient(srv.URL, "agent", "owner")
+
+	// Existing label → 409.
+	r := httptest.NewRequest("POST", "/api/card/capture", strings.NewReader(`{"label":"personal"}`))
+	w := httptest.NewRecorder()
+	a.captureHandler(w, r)
+	if w.Code != 409 {
+		t.Fatalf("want 409, got %d %s", w.Code, w.Body)
+	}
+	// New label → 200 with capture URL.
+	r = httptest.NewRequest("POST", "/api/card/capture", strings.NewReader(`{"label":"backup"}`))
+	w = httptest.NewRecorder()
+	a.captureHandler(w, r)
+	if w.Code != 200 {
+		t.Fatalf("want 200, got %d %s", w.Code, w.Body)
+	}
+	// Bad label → 400.
+	r = httptest.NewRequest("POST", "/api/card/capture", strings.NewReader(`{"label":"BAD LABEL!"}`))
+	w = httptest.NewRecorder()
+	a.captureHandler(w, r)
+	if w.Code != 400 {
+		t.Fatalf("want 400, got %d", w.Code)
+	}
+}

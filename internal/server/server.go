@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net"
@@ -394,6 +395,28 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad label"})
 		return
+	}
+	// Replacing an existing card must not leave old grants pointing at the
+	// new credential: revoke live grants + deny pending approvals first.
+	_, replacing := s.st.GetCredential(h.String())
+	if replacing == nil {
+		var pendingIDs []string
+		if aps, err := s.st.ListApprovals("pending"); err == nil {
+			for _, ap := range aps {
+				if ap.Handle == h.String() {
+					pendingIDs = append(pendingIDs, ap.ID)
+				}
+			}
+		}
+		if n, err := s.st.RevokeGrantsForHandle(h.String()); err != nil {
+			slog.Debug("grant revoke on replace failed", "error", err)
+		} else if n > 0 {
+			for _, id := range pendingIDs {
+				s.signalWaiters(id)
+			}
+			detail := fmt.Sprintf("%d grants revoked", n)
+			_ = s.chain.Append(&store.AuditEntry{Handle: h.String(), Edge: "capture", Target: "replace", Decision: "allow", Detail: detail})
+		}
 	}
 	if err := s.st.UpsertCredential(&store.Credential{
 		Handle: h.String(), Type: "card", Label: c.Label,

@@ -288,3 +288,42 @@ func TestMigrationToleratesPreAppliedV3(t *testing.T) {
 		t.Fatalf("user_version = %d, want %d", version, len(migrations))
 	}
 }
+
+func TestRevokeGrantsForHandle(t *testing.T) {
+	s := tempStore(t)
+	a, err := s.CreateAgent("bot", "h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(id, handle string) {
+		t.Helper()
+		if err := s.AddGrant(&Grant{ID: id, AgentID: a.ID, Handle: handle, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("g1", "card://x")
+	mk("g2", "card://x")
+	mk("g3", "card://y")
+	if err := s.RevokeGrant("g1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateApproval(&Approval{ID: "ap1", AgentID: a.ID, Handle: "card://x", Status: "pending", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.RevokeGrantsForHandle("card://x")
+	if err != nil || n != 2 {
+		t.Fatalf("want 2 rows (g2 + ap1; g1 already revoked), got %d err=%v", n, err)
+	}
+	g2, _ := s.GetGrant("g2")
+	if g2.RevokedAt == nil {
+		t.Fatal("g2 not revoked")
+	}
+	ap1, _ := s.GetApproval("ap1")
+	if ap1.Status != "denied" {
+		t.Fatalf("ap1 status %q", ap1.Status)
+	}
+	g3, _ := s.GetGrant("g3")
+	if g3.RevokedAt != nil {
+		t.Fatal("g3 for another handle revoked")
+	}
+}

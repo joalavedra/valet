@@ -217,6 +217,26 @@ func (s *SQLite) RevokeGrant(id string) error {
 	return nil
 }
 
+// RevokeGrantsForHandle marks all unrevoked grants for a handle revoked and
+// denies its pending approvals (card replacement must not let old grants
+// charge the new credential).
+func (s *SQLite) RevokeGrantsForHandle(handle string) (int, error) {
+	total := 0
+	for _, q := range []string{
+		`UPDATE grants SET revoked_at=CURRENT_TIMESTAMP WHERE handle = ? AND revoked_at IS NULL`,
+		`UPDATE approvals SET status='denied', decided_at=CURRENT_TIMESTAMP WHERE handle = ? AND status='pending'`,
+	} {
+		res, err := s.db.Exec(q, handle)
+		if err != nil {
+			return total, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			total += int(n)
+		}
+	}
+	return total, nil
+}
+
 func (s *SQLite) CreateApproval(a *Approval) error {
 	_, err := s.db.Exec(
 		`INSERT INTO approvals (id, agent_id, handle, purpose, policy_json, ttl_seconds, max_uses, status, expires_at) VALUES (?,?,?,?,?,?,?,?,?)`,

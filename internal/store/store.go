@@ -101,6 +101,9 @@ type Store interface {
 	ListGrants() ([]Grant, error)
 	IncrementGrantUses(id string) error
 	RevokeGrant(id string) error
+	// RevokeGrantsForHandle revokes every live grant and denies every
+	// pending approval request for the handle; returns rows affected.
+	RevokeGrantsForHandle(handle string) (int, error)
 
 	CreateApproval(a *Approval) error
 	GetApproval(id string) (*Approval, error)

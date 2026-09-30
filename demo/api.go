@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -56,12 +57,45 @@ func (a *app) resolveCard(ctx context.Context) (string, []cardInfo, error) {
 		}
 	}
 	if !found {
+		// The configured/persisted default is gone — fall back to the first
+		// card and persist it so a re-added old label can't sneak back in.
 		def = ""
 		if len(cards) > 0 {
 			def = cards[0].Label
 		}
+		a.mu.Lock()
+		a.defaultCard = def
+		a.mu.Unlock()
+		a.saveState()
 	}
 	return def, cards, nil
+}
+
+// demoState persists the selected default card across restarts.
+type demoState struct {
+	DefaultCard string `json:"default_card"`
+}
+
+func (a *app) stateFile() string {
+	if f := os.Getenv("DEMO_STATE_FILE"); f != "" {
+		return f
+	}
+	return "demo-state.json"
+}
+
+func (a *app) loadState() {
+	var st demoState
+	if b, err := os.ReadFile(a.stateFile()); err == nil && json.Unmarshal(b, &st) == nil && st.DefaultCard != "" {
+		a.defaultCard = st.DefaultCard
+	}
+}
+
+// saveState writes the current default card (0600); best effort.
+func (a *app) saveState() {
+	a.mu.Lock()
+	b, _ := json.Marshal(demoState{DefaultCard: a.defaultCard})
+	a.mu.Unlock()
+	_ = os.WriteFile(a.stateFile(), b, 0o600)
 }
 
 func (a *app) stateHandler(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +153,18 @@ func (a *app) captureHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "bad label"})
 		return
 	}
+	// No implicit replace: a label already in the wallet must be removed first.
+	_, cards, err := a.resolveCard(r.Context())
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	for _, c := range cards {
+		if c.Label == label {
+			writeJSON(w, 409, map[string]string{"error": "label already in use — remove it first"})
+			return
+		}
+	}
 	returnURL := a.cfg.PublicURL + "/?saved=1"
 	out, err := a.valet.ownerCreateCapture(r.Context(), label, 900, returnURL)
 	if err != nil {
@@ -138,6 +184,10 @@ func (a *app) defaultCardHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	label := strings.ToLower(strings.TrimSpace(req.Label))
+	if !cardLabelRE.MatchString(label) {
+		writeJSON(w, 400, map[string]string{"error": "bad label"})
+		return
+	}
 	h, err := a.valet.ownerList(r.Context(), "/v1/owner/handles")
 	if err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
@@ -158,6 +208,7 @@ func (a *app) defaultCardHandler(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	a.defaultCard = label
 	a.mu.Unlock()
+	a.saveState()
 	writeJSON(w, 200, map[string]string{"default": label})
 }
 
@@ -165,6 +216,10 @@ func (a *app) defaultCardHandler(w http.ResponseWriter, r *http.Request) {
 // to the first remaining card when the default is deleted.
 func (a *app) deleteCardHandler(w http.ResponseWriter, r *http.Request) {
 	label := r.PathValue("label")
+	if !cardLabelRE.MatchString(label) {
+		writeJSON(w, 400, map[string]string{"error": "bad label"})
+		return
+	}
 	if _, err := a.valet.ownerDelete(r.Context(), "/v1/owner/handles/"+url.PathEscape("card://"+label)); err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
@@ -173,6 +228,7 @@ func (a *app) deleteCardHandler(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		a.defaultCard = ""
 		a.mu.Unlock()
+		a.saveState()
 	}
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
 }

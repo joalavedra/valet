@@ -63,8 +63,10 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       DEMO_CARD_LABEL: ${DEMO_CARD_LABEL:-personal}
+      DEMO_STATE_FILE: /state/demo-state.json
     volumes:
       - valet-data:/data:ro
+      - demo-state:/state
     ports:
       - "8080:8080"
     depends_on:
@@ -73,3 +75,4 @@ services:
 
 volumes:
   valet-data:
+  demo-state:

@@ -1637,3 +1637,52 @@ func TestOwnerDeleteHandle(t *testing.T) {
 		t.Fatal("no owner-delete audit entry")
 	}
 }
+
+func TestCaptureReplaceRevokesGrants(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	srv.SetCardProvider(&fakeProvider{})
+	// First capture creates card://visa-re.
+	tok := "cap-r1"
+	if err := st.CreateCapture(&store.Capture{Token: tok, Label: "visa-re", Metadata: `{"provider":"vgs"}`, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	rec := capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_pan_1", "exp_month": "12", "exp_year": "2030", "last4": "0000",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("first capture: %d %s", rec.Code, rec.Body)
+	}
+	// A live grant against that handle.
+	grantTok := issueGrantHandle(t, srv, st, agentTok, "card://visa-re", `{"spend":{"per_tx":100}}`, time.Hour)
+	// Re-capture the same label — replaces the credential.
+	tok = "cap-r2"
+	if err := st.CreateCapture(&store.Capture{Token: tok, Label: "visa-re", Metadata: `{"provider":"vgs"}`, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	rec = capReq(t, srv, "POST", "/capture/"+tok+"/complete", map[string]any{
+		"number": "tok_pan_2", "exp_month": "12", "exp_year": "2031", "last4": "9999",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("second capture: %d %s", rec.Code, rec.Body)
+	}
+	// The old grant is revoked.
+	grantID, _, _ := strings.Cut(grantTok, ".")
+	g, err := st.GetGrant(grantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.RevokedAt == nil {
+		t.Fatal("grant on replaced handle still live")
+	}
+	// Replace audit entry exists.
+	audits, _ := st.ListAudit(20)
+	found := false
+	for _, a := range audits {
+		if a.Edge == "capture" && a.Target == "replace" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no capture/replace audit entry")
+	}
+}
