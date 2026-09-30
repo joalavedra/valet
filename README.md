@@ -306,6 +306,37 @@ within `min(per_tx, total-spent, max_amount)`; otherwise the call is
 denied and nothing is signed. Set `VALET_REQUIRE_APPROVAL=card,wallet`
 to require owner approval for wallet grants too.
 
+### MPP (Tempo)
+
+The same `wallet://` credential also answers MPP
+([Machine Payments Protocol](https://paymentauth.org)) challenges —
+`WWW-Authenticate: Payment` with the `tempo`/`charge` method — via
+`POST /v1/edge/wallet/mpp` or the MCP tool:
+
+```
+mpp_fetch(grant, url, method, headers, body, max_amount)
+```
+
+Valet signs a Tempo pull-mode transaction (TIP-20 transfer with
+attribution memo; zero-amount challenges get a proof credential) with the
+same Openfort digest signer — push mode and arbitrary signing are not
+exposed. Only chains listed in the credential's `network` metadata are
+paid; `asset` resolves per chain (on Tempo chains the default
+stablecoins: pathUSD/OUSD on Moderato `eip155:42431`, USDC.e/OUSD on
+mainnet `eip155:4217`).
+
+Configure both protocols on one credential with a comma-separated
+network list:
+
+```bash
+valet cred add --type wallet --label agent --address 0x.. \
+  --network eip155:84532,eip155:42431
+```
+
+For the Tempo Moderato testnet (chain 42431), fund the wallet with
+pathUSD `0x20c0000000000000000000000000000000000000` via the
+`tempo_fundAddress` RPC method on the Moderato RPC.
+
 ## Human approvals & wallet
 
 Grant requests can require a human decision before a token is issued. An

@@ -21,6 +21,8 @@ import (
 	exactv1 "github.com/x402-foundation/x402/go/mechanisms/evm/exact/v1/client"
 	evmv1 "github.com/x402-foundation/x402/go/mechanisms/evm/v1"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/joalavedra/valet/internal/edge/egress"
 	"github.com/joalavedra/valet/internal/edge/netguard"
 	"github.com/joalavedra/valet/internal/edge/wallet/openfort"
@@ -57,6 +59,24 @@ func (s *Signer) SignTypedData(ctx context.Context, domain evm.TypedDataDomain, 
 	return s.of.SignHash(ctx, s.accountID, h)
 }
 
+// SignHash signs a raw 32-byte digest via Openfort and returns r||s||v
+// with v normalized to 0/1 (yParity) for MPP/Tempo envelopes.
+func (s *Signer) SignHash(ctx context.Context, hash [32]byte) ([]byte, error) {
+	sig, err := s.of.SignHash(ctx, s.accountID, hash)
+	if err != nil {
+		return nil, err
+	}
+	if sig[64] >= 27 {
+		sig[64] -= 27
+	}
+	return sig, nil
+}
+
+// AddressCommon returns the wallet address as go-ethereum common.Address.
+func (s *Signer) AddressCommon() common.Address {
+	return common.HexToAddress(s.address)
+}
+
 // Policy constrains which payment requirements Fetch may fulfill.
 type Policy struct {
 	MaxAmount *big.Int // per call, asset minor units (USDC 6dp); nil = no cap
@@ -78,6 +98,9 @@ type Request struct {
 
 // PaymentInfo is the receipt of a settled x402 payment.
 type PaymentInfo struct {
+	Protocol    string `json:"protocol,omitempty"`
+	Method      string `json:"method,omitempty"`
+	Receipt     string `json:"receipt,omitempty"`
 	Network     string `json:"network"`
 	Asset       string `json:"asset"`
 	PayTo       string `json:"pay_to"`
@@ -199,10 +222,18 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 	if err != nil {
 		var pe *x402.PaymentError
 		if errors.As(err, &pe) {
-			return nil, fmt.Errorf("%w: %s", ErrPolicy, scrubErr(err))
+			return nil, fmt.Errorf("%w: %s", ErrPolicy, ScrubErr(err))
+		}
+		// The payment signature was already sent and the conn died — the
+		// upstream may still settle; conservatively count it as paid.
+		if paidView.network != "" {
+			return &Response{Status: 0, PaymentAttempted: true, Payment: &PaymentInfo{
+				Network: paidView.network, Asset: paidView.asset,
+				PayTo: paidView.payTo, Amount: paidView.amount,
+			}}, nil
 		}
 		if errors.Is(err, netguard.ErrBlocked) {
-			return nil, fmt.Errorf("%w: %s", ErrPolicy, scrubErr(err))
+			return nil, fmt.Errorf("%w: %s", ErrPolicy, ScrubErr(err))
 		}
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}
@@ -292,9 +323,9 @@ func matchCI(list []string, v string) bool {
 	return false
 }
 
-// scrubErr shortens SDK errors to a single line, dropping any base64
+// ScrubErr shortens SDK errors to a single line, dropping any base64
 // blobs that would leak the payment payload into agent-visible errors.
-func scrubErr(err error) string {
+func ScrubErr(err error) string {
 	s := err.Error()
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
