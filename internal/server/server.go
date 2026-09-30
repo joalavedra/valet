@@ -64,6 +64,17 @@ type Server struct {
 	captureReturnOrigins []string
 	waitersMu            sync.Mutex
 	waiters              map[string]*waiter
+	// grantLocks serializes edge calls that read+update a grant's spend
+	// so concurrent payments can't overshoot the cumulative total.
+	grantLocks sync.Map // grant id -> *sync.Mutex
+}
+
+// lockGrant returns an unlock func holding a per-grant mutex.
+func (s *Server) lockGrant(id string) func() {
+	v, _ := s.grantLocks.LoadOrStore(id, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // waiter is a shared notification channel for polls on the same request id;
@@ -926,6 +937,13 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant is not for a wallet handle"})
 		return
 	}
+	// Serialize the spend check+record per grant; re-read so Spent is
+	// fresh after another call may have paid.
+	unlock := s.lockGrant(g.ID)
+	defer unlock()
+	if fresh, err := s.st.GetGrant(g.ID); err == nil {
+		g = fresh
+	}
 	u, err := url.Parse(req.URL)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
 		s.auditDeny(a.ID, g.Handle, "wallet", "", "bad_url")
@@ -1043,7 +1061,8 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 	if err != nil {
 		if errors.Is(err, wallet.ErrPolicy) {
 			s.auditDeny(a.ID, g.Handle, "wallet", target, "policy_denied")
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "payment not allowed by policy"})
+			msg := strings.TrimPrefix(err.Error(), wallet.ErrPolicy.Error()+": ")
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": msg})
 			return
 		}
 		slog.Debug("x402 fetch failed", "error", err)
@@ -1124,7 +1143,7 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "amount required"})
 		return
 	}
-	d := policy.Evaluate(&p, &policy.GrantView{ExpiresAt: g.ExpiresAt, Uses: g.Uses, MaxUses: g.MaxUses}, policy.Request{
+	d := policy.Evaluate(&p, &policy.GrantView{ExpiresAt: g.ExpiresAt, Uses: g.Uses, MaxUses: g.MaxUses, Spent: g.Spent}, policy.Request{
 		Host: merchant, Merchant: merchant, Path: u.Path, Method: req.Method,
 		Amount: req.Amount, Currency: req.Currency, Now: time.Now(),
 	})
@@ -1179,6 +1198,9 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		s.auditDeny(a.ID, g.Handle, "card", merchant, grantReason(err))
 		writeJSON(w, grantStatus(err), map[string]string{"error": grantErrorMessage(err, grantReason(err))})
 		return
+	}
+	if err := s.st.AddGrantSpend(g.ID, req.Amount); err != nil {
+		slog.Debug("spend record failed", "error", err)
 	}
 	res, err := card.Do(r.Context(), prov, freq, fields)
 	if err != nil {
@@ -1574,6 +1596,7 @@ type ownerGrantView struct {
 	ExpiresAt time.Time       `json:"expires_at"`
 	MaxUses   int             `json:"max_uses"`
 	Uses      int             `json:"uses"`
+	Spent     int64           `json:"spent"`
 	CreatedAt time.Time       `json:"created_at"`
 	RevokedAt *time.Time      `json:"revoked_at"`
 	Active    bool            `json:"active"`
@@ -1606,7 +1629,9 @@ func (s *Server) ownerGrants(w http.ResponseWriter, r *http.Request) {
 		if effectiveMax == 0 || (p.MaxUses > 0 && p.MaxUses < effectiveMax) {
 			effectiveMax = p.MaxUses
 		}
-		v.Active = v.RevokedAt == nil && time.Now().Before(g.ExpiresAt) && (effectiveMax == 0 || g.Uses < effectiveMax)
+		v.Spent = g.Spent
+		spendOK := p.Spend == nil || p.Spend.Total == 0 || g.Spent < p.Spend.Total
+		v.Active = v.RevokedAt == nil && time.Now().Before(g.ExpiresAt) && (effectiveMax == 0 || g.Uses < effectiveMax) && spendOK
 		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"grants": out})

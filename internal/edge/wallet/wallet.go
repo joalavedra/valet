@@ -181,6 +181,13 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 		if lk == "host" || lk == "connection" || strings.HasPrefix(lk, "proxy-") {
 			continue
 		}
+		// Agent-supplied x402 payment headers must never reach the
+		// upstream — only the edge may attach a payment signature.
+		switch lk {
+		case "payment-signature", "x-payment", "payment-required",
+			"payment-response", "x-payment-response":
+			continue
+		}
 		hreq.Header.Set(k, v)
 	}
 	resp, err := hc.Do(hreq)
@@ -192,11 +199,23 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}
 	defer resp.Body.Close()
+	out := &Response{Status: resp.StatusCode, Headers: map[string]string{}}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
-	if err != nil {
+	if err != nil && paidView.network == "" {
 		return nil, fmt.Errorf("read failed: %w", err)
 	}
-	out := &Response{Status: resp.StatusCode, Headers: map[string]string{}, Body: string(raw)}
+	// If we signed a payment and the body then died mid-read, the
+	// upstream may still settle — conservatively count it as paid
+	// rather than lose the receipt.
+	if err != nil {
+		out.PaymentAttempted = true
+		out.Payment = &PaymentInfo{
+			Network: paidView.network, Asset: paidView.asset,
+			PayTo: paidView.payTo, Amount: paidView.amount,
+		}
+		return out, nil
+	}
+	out.Body = string(raw)
 	if len(raw) > maxBody {
 		out.Body = string(raw[:maxBody])
 		out.Truncated = true
@@ -221,24 +240,24 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 			PayTo: paidView.payTo, Amount: paidView.amount,
 		}
 	}
-	// Settlement receipt (tx hash, payer) rides in PAYMENT-RESPONSE.
-	hdrs := map[string]string{}
-	for k, vv := range resp.Header {
-		if len(vv) > 0 {
-			hdrs[k] = vv[0]
+	// Settlement receipt (tx hash, payer) rides in PAYMENT-RESPONSE —
+	// meaningful only after we actually sent a payment.
+	if paidView.network != "" && out.Payment != nil {
+		hdrs := map[string]string{}
+		for k, vv := range resp.Header {
+			if len(vv) > 0 {
+				hdrs[k] = vv[0]
+			}
 		}
-	}
-	if settle, err := x402http.Newx402HTTPClient(client).GetPaymentSettleResponse(hdrs); err == nil && settle != nil {
-		if out.Payment == nil {
-			out.Payment = &PaymentInfo{Network: string(settle.Network)}
-		}
-		out.Payment.Transaction = settle.Transaction
-		out.Payment.Payer = settle.Payer
-		if settle.Amount != "" {
-			out.Payment.Amount = settle.Amount
-		}
-		if out.Payment.Network == "" {
-			out.Payment.Network = string(settle.Network)
+		if settle, err := x402http.Newx402HTTPClient(client).GetPaymentSettleResponse(hdrs); err == nil && settle != nil {
+			out.Payment.Transaction = settle.Transaction
+			out.Payment.Payer = settle.Payer
+			if settle.Amount != "" {
+				out.Payment.Amount = settle.Amount
+			}
+			if out.Payment.Network == "" {
+				out.Payment.Network = string(settle.Network)
+			}
 		}
 	}
 	return out, nil

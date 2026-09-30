@@ -198,3 +198,15 @@ func TestNewBadSecret(t *testing.T) {
 func pemEncodeJunk() []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("junk")})
 }
+
+func TestNoRedirectFollow(t *testing.T) {
+	_, b64 := testKey(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://evil.example.com/x", 302)
+	}))
+	defer srv.Close()
+	c, _ := New("sk", b64, WithBaseURL(srv.URL))
+	if _, err := c.SignHash(context.Background(), "acc_1", [32]byte{}); err == nil {
+		t.Fatal("redirect followed or error missing")
+	}
+}

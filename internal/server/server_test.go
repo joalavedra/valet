@@ -1885,3 +1885,137 @@ func TestCaptureReplaceRevokesGrants(t *testing.T) {
 		t.Fatal("no capture/replace audit entry")
 	}
 }
+
+func TestWalletX402ConcurrentSpend(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		time.Sleep(20 * time.Millisecond) // widen the race
+		amt := "10"
+		if pol.MaxAmount != nil && pol.MaxAmount.Int64() < 10 {
+			return nil, fmt.Errorf("%w: grant total limit exceeded", wallet.ErrPolicy)
+		}
+		return &wallet.Response{Status: 200, Payment: &wallet.PaymentInfo{
+			Network: "eip155:84532", Asset: "0xusdc", PayTo: "0xp", Amount: amt, Transaction: "0xt",
+		}}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"],"spend":{"total":15}}`, time.Hour)
+	var wg sync.WaitGroup
+	codes := make(chan int, 2)
+	bodies := make(chan string, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := x402Req(t, srv, agentTok, map[string]any{
+				"grant_token": tok, "url": "https://api.example.com/x",
+			})
+			codes <- rec.Code
+			bodies <- rec.Body.String()
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	close(bodies)
+	paid, denied := 0, 0
+	for c := range codes {
+		if c == 200 {
+			paid++
+		} else if c == 403 {
+			denied++
+		}
+	}
+	if paid != 1 || denied != 1 {
+		t.Fatalf("paid=%d denied=%d", paid, denied)
+	}
+	for b := range bodies {
+		t.Log(b)
+	}
+	tokID, _, _ := strings.Cut(tok, ".")
+	g, _ := st.GetGrant(tokID)
+	if g.Spent != 10 {
+		t.Fatalf("spent=%d want 10", g.Spent)
+	}
+}
+
+func TestCardPaySpendTotal(t *testing.T) {
+	srv, st, tok := testServer(t)
+	cardCred(t, srv, st)
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"charged":true}`)
+	}))
+	defer upstream.Close()
+	srv.SetCardProvider(&fakeProvider{upstream: upstream})
+	gtok := issueGrantHandle(t, srv, st, tok, "card://visa-4242",
+		`{"spend":{"merchants":["*"],"total":15}}`, time.Hour)
+	pay := func() *httptest.ResponseRecorder {
+		rec, req := payReq(t, tok, map[string]any{
+			"grant_token": gtok, "url": upstream.URL + "/charge", "method": "POST",
+			"body": `{"pan":"{{card.number}}"}`, "amount": 10, "currency": "USD",
+		})
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := pay(); rec.Code != 200 {
+		t.Fatalf("first pay: %d %s", rec.Code, rec.Body)
+	}
+	rec := pay()
+	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "grant total limit exceeded") {
+		t.Fatalf("second pay: %d %s", rec.Code, rec.Body)
+	}
+	tokID, _, _ := strings.Cut(gtok, ".")
+	g, _ := st.GetGrant(tokID)
+	if g.Spent != 10 {
+		t.Fatalf("spent=%d", g.Spent)
+	}
+}
+
+func TestOwnerGrantsSpentAndActive(t *testing.T) {
+	t.Setenv("VALET_OWNER_TOKEN", "owner-tok")
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["x"],"spend":{"total":15}}`, time.Hour)
+	tokID, _, _ := strings.Cut(tok, ".")
+	if err := st.AddGrantSpend(tokID, 15); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/v1/owner/grants", nil)
+	req.Header.Set("Authorization", "Bearer owner-tok")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Grants []struct {
+			Spent  int64 `json:"spent"`
+			Active bool  `json:"active"`
+		} `json:"grants"`
+	}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if len(out.Grants) == 0 {
+		t.Fatal("no grants")
+	}
+	for _, gr := range out.Grants {
+		if gr.Spent == 15 && gr.Active {
+			t.Fatal("grant at total still active")
+		}
+	}
+	var wg *struct {
+		Spent  int64 `json:"spent"`
+		Active bool  `json:"active"`
+	}
+	for i := range out.Grants {
+		if out.Grants[i].Spent == 15 {
+			wg = &out.Grants[i]
+		}
+	}
+	if wg == nil || wg.Spent != 15 {
+		t.Fatal("spent not surfaced")
+	}
+}

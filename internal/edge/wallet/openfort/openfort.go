@@ -67,7 +67,13 @@ func New(secretKey, walletSecretB64DER string, opts ...Option) (*Client, error) 
 	if !ok || ec.Curve != elliptic.P256() {
 		return nil, fmt.Errorf("openfort: wallet secret is not a P-256 key")
 	}
-	c := &Client{baseURL: defaultBase, http: &http.Client{Timeout: 30 * time.Second}, secretKey: secretKey, walletKey: ec}
+	c := &Client{baseURL: defaultBase, secretKey: secretKey, walletKey: ec,
+		http: &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}}
 	for _, o := range opts {
 		o(c)
 	}

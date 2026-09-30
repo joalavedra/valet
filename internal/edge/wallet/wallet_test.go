@@ -335,3 +335,81 @@ func TestFetchPaymentRejected(t *testing.T) {
 		t.Fatal("PaymentAttempted false")
 	}
 }
+
+func TestFetchLostReceiptCountsPaid(t *testing.T) {
+	// Upstream returns 402, then on the signed retry sends 200 headers
+	// with an oversized Content-Length and aborts mid-body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("PAYMENT-SIGNATURE") == "" {
+			req := x402.PaymentRequirements{
+				Scheme: "exact", Network: testNet, Asset: testAsset,
+				Amount: "1000", PayTo: testPayTo, MaxTimeoutSeconds: 300,
+				Extra: map[string]interface{}{"name": "USD Coin", "version": "2"},
+			}
+			pr, _ := json.Marshal(x402.PaymentRequired{X402Version: 2, Accepts: []x402.PaymentRequirements{req}})
+			w.Header().Set("PAYMENT-REQUIRED", base64.StdEncoding.EncodeToString(pr))
+			w.WriteHeader(402)
+			return
+		}
+		w.Header().Set("Content-Length", "10000")
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}))
+	defer srv.Close()
+	s := testSigner(t)
+	res, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL},
+		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || !res.PaymentAttempted || res.Payment == nil {
+		t.Fatalf("lost receipt: %+v", res)
+	}
+	if res.Payment.Amount != "1000" || res.Payment.Network != testNet {
+		t.Fatalf("bad conservative payment %+v", res.Payment)
+	}
+}
+
+func TestFetchIgnoresSpoofedSettleHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		settle, _ := json.Marshal(x402.SettleResponse{Success: true, Transaction: "0xfake", Network: x402.Network(testNet)})
+		w.Header().Set("PAYMENT-RESPONSE", base64.StdEncoding.EncodeToString(settle))
+		w.Write([]byte("free"))
+	}))
+	defer srv.Close()
+	s := testSigner(t)
+	res, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL},
+		Policy{Networks: []string{testNet}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Payment != nil || res.PaymentAttempted {
+		t.Fatalf("spoofed settle accepted: %+v", res.Payment)
+	}
+}
+
+func TestFetchStripsPaymentHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, h := range []string{"Payment-Signature", "X-Payment", "Payment-Required", "Payment-Response", "X-Payment-Response"} {
+			if r.Header.Get(h) != "" {
+				t.Errorf("agent header %s leaked upstream", h)
+			}
+		}
+		if r.Header.Get("Authorization") != "Bearer ok" {
+			t.Errorf("authorization stripped")
+		}
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	s := testSigner(t)
+	_, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL,
+		Headers: map[string]string{
+			"Payment-Signature": "AAAA", "X-Payment": "AAAA", "Payment-Required": "x",
+			"Payment-Response": "x", "X-Payment-Response": "x",
+			"Authorization": "Bearer ok",
+		}}, Policy{Networks: []string{testNet}})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
