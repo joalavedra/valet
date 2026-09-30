@@ -62,6 +62,17 @@ func OpenSQLite(path string) (*SQLite, error) {
 var ErrNotFound = errors.New("store: not found")
 
 func (s *SQLite) AddCredential(c *Credential) error {
+	res, err := s.db.Exec(
+		`INSERT INTO credentials (handle, type, site, label, metadata_json, ciphertext) VALUES (?,?,?,?,?,?)`,
+		c.Handle, c.Type, c.Site, c.Label, c.Metadata, c.Ciphertext)
+	if err != nil {
+		return err
+	}
+	c.ID, _ = res.LastInsertId()
+	return nil
+}
+
+func (s *SQLite) UpsertCredential(c *Credential) error {
 	_, err := s.db.Exec(
 		`INSERT INTO credentials (handle, type, site, label, metadata_json, ciphertext) VALUES (?,?,?,?,?,?)
 		 ON CONFLICT(handle) DO UPDATE SET type=excluded.type, site=excluded.site,

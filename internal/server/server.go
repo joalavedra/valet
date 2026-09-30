@@ -395,7 +395,7 @@ func (s *Server) captureComplete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad label"})
 		return
 	}
-	if err := s.st.AddCredential(&store.Credential{
+	if err := s.st.UpsertCredential(&store.Credential{
 		Handle: h.String(), Type: "card", Label: c.Label,
 		Metadata: string(meta), Ciphertext: ct,
 	}); err != nil {

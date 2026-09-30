@@ -85,6 +85,9 @@ type AuditEntry struct {
 // Store is the persistence contract.
 type Store interface {
 	AddCredential(c *Credential) error
+	// UpsertCredential inserts or replaces the credential at c.Handle
+	// (used by card capture so re-capturing a label refreshes it).
+	UpsertCredential(c *Credential) error
 	GetCredential(h string) (*Credential, error)
 	ListCredentials() ([]Credential, error)
 	DeleteCredential(h string) error

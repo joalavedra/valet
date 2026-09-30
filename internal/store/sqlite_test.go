@@ -40,9 +40,12 @@ func TestCredentialRoundTrip(t *testing.T) {
 	if _, err := s.GetCredential("cred://no/x"); err != ErrNotFound {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
-	// Re-adding the same handle upserts (re-capture replaces the card).
+	if err := s.AddCredential(c); err == nil {
+		t.Fatal("want unique constraint error")
+	}
+	// UpsertCredential replaces (re-capture refreshes the card).
 	c2 := &Credential{Handle: c.Handle, Type: "card", Label: "joan", Metadata: `{"v":2}`, Ciphertext: []byte("ct2")}
-	if err := s.AddCredential(c2); err != nil {
+	if err := s.UpsertCredential(c2); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	got, err = s.GetCredential(c.Handle)
