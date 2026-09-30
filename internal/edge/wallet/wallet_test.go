@@ -184,7 +184,7 @@ func TestFetchPaysV2(t *testing.T) {
 	srv := v2Server(t, "1000")
 	defer srv.Close()
 	s := testSigner(t)
-	res, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL + "/data"},
+	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL + "/data"},
 		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +207,7 @@ func TestFetchPassthrough(t *testing.T) {
 	}))
 	defer srv.Close()
 	s := testSigner(t)
-	res, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL},
+	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
 		Policy{Networks: []string{testNet}})
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestFetchDenies(t *testing.T) {
 	for _, tc := range cases {
 		srv := v2Server(t, "1000", tc.mut)
 		s := &countingSigner{inner: testSigner(t)}
-		_, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL}, tc.pol)
+		_, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL}, tc.pol)
 		if !errors.Is(err, ErrPolicy) {
 			t.Fatalf("%s: want ErrPolicy, got %v", tc.name, err)
 		}
@@ -244,7 +244,7 @@ func TestFetchDenies(t *testing.T) {
 	// Empty networks denies even a well-formed offer.
 	srv := v2Server(t, "100")
 	s := testSigner(t)
-	if _, err := Fetch(context.Background(), s, Request{URL: srv.URL}, Policy{}); !errors.Is(err, ErrPolicy) {
+	if _, err := Fetch(context.Background(), Signers{EVM: s}, Request{URL: srv.URL}, Policy{}); !errors.Is(err, ErrPolicy) {
 		t.Fatalf("empty networks: want ErrPolicy, got %v", err)
 	}
 	srv.Close()
@@ -272,7 +272,7 @@ func TestFetchV1(t *testing.T) {
 	}))
 	defer srv.Close()
 	s := testSigner(t)
-	res, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL},
+	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
 		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(1000)})
 	if err != nil {
 		t.Fatal(err)
@@ -317,7 +317,7 @@ func TestFetchPaymentRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 	s := &countingSigner{inner: testSigner(t)}
-	res, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL},
+	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
 		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
 	if err != nil {
 		t.Fatal(err)
@@ -358,7 +358,7 @@ func TestFetchLostReceiptCountsPaid(t *testing.T) {
 	}))
 	defer srv.Close()
 	s := testSigner(t)
-	res, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL},
+	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
 		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +379,7 @@ func TestFetchIgnoresSpoofedSettleHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 	s := testSigner(t)
-	res, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL},
+	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
 		Policy{Networks: []string{testNet}})
 	if err != nil {
 		t.Fatal(err)
@@ -403,7 +403,7 @@ func TestFetchStripsPaymentHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 	s := testSigner(t)
-	_, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL,
+	_, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL,
 		Headers: map[string]string{
 			"Payment-Signature": "AAAA", "X-Payment": "AAAA", "Payment-Required": "x",
 			"Payment-Response": "x", "X-Payment-Response": "x",
@@ -411,5 +411,47 @@ func TestFetchStripsPaymentHeaders(t *testing.T) {
 		}}, Policy{Networks: []string{testNet}})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A server that hijacks and closes the connection once the payment
+// signature arrives simulates a lost response after paying.
+func TestFetchConnClosedAfterSignature(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("PAYMENT-SIGNATURE") != "" {
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				conn.Close()
+				return
+			}
+			t.Error("no hijacker")
+		}
+		req := x402.PaymentRequirements{
+			Scheme: "exact", Network: testNet, Asset: testAsset,
+			Amount: "1000", PayTo: testPayTo, MaxTimeoutSeconds: 300,
+			Extra: map[string]interface{}{"name": "USD Coin", "version": "2"},
+		}
+		pr, _ := json.Marshal(x402.PaymentRequired{
+			X402Version: 2, Accepts: []x402.PaymentRequirements{req},
+			Resource: &x402.ResourceInfo{URL: "http://" + r.Host + r.URL.Path},
+		})
+		w.Header().Set("PAYMENT-REQUIRED", base64.StdEncoding.EncodeToString(pr))
+		w.WriteHeader(402)
+	}))
+	defer srv.Close()
+	s := testSigner(t)
+	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
+		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.PaymentAttempted || res.Payment == nil {
+		t.Fatalf("expected conservative paid result: %+v", res)
+	}
+	if res.Payment.Network != testNet || res.Payment.Amount != "1000" {
+		t.Fatalf("payment %+v", res.Payment)
+	}
+	if res.Status != 0 {
+		t.Fatalf("status %d", res.Status)
 	}
 }

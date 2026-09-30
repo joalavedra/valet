@@ -23,7 +23,7 @@ import (
 
 var credAddType, credAddLabel, credAddSite, credAddLast4 string
 var credAddTokenize bool
-var credAddAddress, credAddNetwork string
+var credAddAddress, credAddNetwork, credAddSvmAccountID, credAddSvmAddress string
 
 var stdinReader = bufio.NewReader(os.Stdin)
 
@@ -79,7 +79,7 @@ var credAddCmd = &cobra.Command{
 				prompts = []string{"number (alias)", "exp_month", "exp_year", "holder", "cvc (optional)"}
 			}
 		case "wallet":
-			prompts = []string{"secret_key", "wallet_secret", "account_id (optional)"}
+			prompts = []string{"secret_key", "wallet_secret", "account_id (optional)", "svm_account_id (optional)", "svm_address (optional)"}
 		}
 		fieldName := func(prompt string) string {
 			return strings.Split(prompt, " ")[0]
@@ -114,7 +114,7 @@ var credAddCmd = &cobra.Command{
 			meta, _ := json.Marshal(map[string]string{"provider": "vgs", "last4": credAddLast4})
 			metadata = string(meta)
 		case "wallet":
-			meta, err := walletMetadata(context.Background(), fields, credAddAddress, credAddNetwork)
+			meta, err := walletMetadata(context.Background(), fields, credAddAddress, credAddNetwork, credAddSvmAccountID, credAddSvmAddress)
 			if err != nil {
 				return err
 			}
@@ -149,9 +149,18 @@ var credAddCmd = &cobra.Command{
 // walletMetadata resolves the wallet address — from --address, or by
 // creating a new Openfort backend account when account_id was left empty —
 // and returns the credential metadata JSON.
-func walletMetadata(ctx context.Context, fields map[string]string, address, network string) (string, error) {
+func walletMetadata(ctx context.Context, fields map[string]string, address, network, svmAccountID, svmAddress string) (string, error) {
 	if network == "" {
 		network = "eip155:84532"
+	}
+	if svmAccountID != "" {
+		fields["svm_account_id"] = svmAccountID
+	}
+	if svmAddress != "" {
+		fields["svm_address"] = svmAddress
+	}
+	if (fields["svm_account_id"] == "") != (fields["svm_address"] == "") {
+		return "", fmt.Errorf("svm_account_id and svm_address are required together")
 	}
 	if fields["account_id"] == "" {
 		if fields["secret_key"] == "" || fields["wallet_secret"] == "" {
@@ -266,6 +275,8 @@ func init() {
 	credAddCmd.Flags().StringVar(&credAddLast4, "last4", "", "last four digits (card only, recorded in metadata)")
 	credAddCmd.Flags().StringVar(&credAddAddress, "address", "", "wallet only: 0x EVM address (required when account_id is given)")
 	credAddCmd.Flags().StringVar(&credAddNetwork, "network", "eip155:84532", "wallet only: CAIP-2 network the wallet may pay on")
+	credAddCmd.Flags().StringVar(&credAddSvmAccountID, "svm-account-id", "", "wallet only: Openfort SVM backend account id (with --svm-address)")
+	credAddCmd.Flags().StringVar(&credAddSvmAddress, "svm-address", "", "wallet only: base58 Solana address (with --svm-account-id)")
 	credAddCmd.Flags().BoolVar(&credAddTokenize, "tokenize", false, "card only: tokenize the raw PAN/CVC via the provider's Vault API (VGS_CLIENT_ID/VGS_CLIENT_SECRET) and store only the aliases")
 	credAddCmd.MarkFlagRequired("type")
 	credAddCmd.MarkFlagRequired("label")

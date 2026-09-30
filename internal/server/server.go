@@ -33,12 +33,15 @@ import (
 	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
 	"github.com/joalavedra/valet/internal/edge/wallet"
+	mppedg "github.com/joalavedra/valet/internal/edge/wallet/mpp"
 	"github.com/joalavedra/valet/internal/edge/wallet/openfort"
 	"github.com/joalavedra/valet/internal/grant"
 	"github.com/joalavedra/valet/internal/handle"
 	"github.com/joalavedra/valet/internal/policy"
 	"github.com/joalavedra/valet/internal/store"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/x402-foundation/x402/go/mechanisms/evm"
+	"github.com/x402-foundation/x402/go/mechanisms/svm"
 )
 
 // Server holds dependencies for the HTTP API.
@@ -128,6 +131,7 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 	s.mux.HandleFunc("POST /v1/edge/browser/fill", s.agentAuth(s.browserFill))
 	s.mux.HandleFunc("POST /v1/edge/card/pay", s.agentAuth(s.cardPay))
 	s.mux.HandleFunc("POST /v1/edge/wallet/x402", s.agentAuth(s.walletX402))
+	s.mux.HandleFunc("POST /v1/edge/wallet/mpp", s.agentAuth(s.walletMPP))
 	s.mux.HandleFunc("POST /v1/edge/http/call", s.agentAuth(s.httpCall))
 	s.mux.HandleFunc("GET /v1/audit", s.ownerAuth(s.listAudit))
 	s.mux.HandleFunc("GET /v1/owner/handles", s.ownerAuth(s.ownerHandles))
@@ -906,11 +910,20 @@ func (s *Server) SetCardProvider(p card.Provider) { s.cardProv = p }
 var walletFetch = wallet.Fetch
 
 // SetWalletFetcher overrides the x402 fetch implementation (used by tests).
-func (s *Server) SetWalletFetcher(f func(context.Context, evm.ClientEvmSigner, wallet.Request, wallet.Policy) (*wallet.Response, error)) {
+func (s *Server) SetWalletFetcher(f func(context.Context, wallet.Signers, wallet.Request, wallet.Policy) (*wallet.Response, error)) {
 	walletFetch = f
 }
 
-type x402Request struct {
+// mppFetch does the MPP (Tempo charge) fetch; replaceable in tests.
+var mppFetch = mppedg.Fetch
+
+// SetMPPFetcher overrides the MPP fetch implementation (used by tests).
+func (s *Server) SetMPPFetcher(f func(context.Context, mppedg.HashSigner, wallet.Request, mppedg.Policy, tempo.RPCClient) (*wallet.Response, error)) {
+	mppFetch = f
+}
+
+// walletRequest is the shared request shape for wallet payment edges.
+type walletRequest struct {
 	GrantToken string            `json:"grant_token"`
 	URL        string            `json:"url"`
 	Method     string            `json:"method"`
@@ -919,28 +932,56 @@ type x402Request struct {
 	MaxAmount  int64             `json:"max_amount"` // caller cap, minor units; 0 = none
 }
 
-func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Agent) {
-	var req x402Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
-		return
-	}
+type walletMeta struct {
+	Provider string `json:"provider"`
+	Address  string `json:"address"`
+	Network  string `json:"network"` // eip155 refs, comma-separated list allowed
+	Asset    string `json:"asset"`
+}
+
+// walletCallCtx carries the verified grant, decrypted credential and
+// Openfort client shared by the x402 and MPP payment edges. Callers
+// must defer unlock() and wipe(fields).
+type walletCallCtx struct {
+	g       *store.Grant
+	cred    *store.Credential
+	meta    walletMeta
+	fields  map[string]string
+	of      *openfort.Client
+	signers wallet.Signers
+	pol     *policy.Policy
+	capAmt  *big.Int
+	target  string
+	unlock  func()
+}
+
+// walletPrelude runs the common verification path for wallet payment
+// edges: grant verify + wallet kind, per-grant lock with a fresh Spent
+// read, https+host check, hosts-scope requirement, policy evaluation,
+// credential decrypt, Openfort client and the per-call amount cap.
+// On failure it writes the error response and returns ok=false.
+func (s *Server) walletPrelude(w http.ResponseWriter, r *http.Request, a *store.Agent, req *walletRequest) (*walletCallCtx, bool) {
 	g, err := s.issuer.Verify(req.GrantToken, a.ID)
 	if err != nil {
 		s.auditDeny(a.ID, "", "wallet", "", grantReason(err))
 		writeJSON(w, grantStatus(err), map[string]string{"error": grantErrorMessage(err, grantReason(err))})
-		return
+		return nil, false
 	}
 	kind, _, _, err := handle.Parse(g.Handle)
 	if err != nil || kind != "wallet" {
 		s.auditDeny(a.ID, g.Handle, "wallet", "", "not_wallet_handle")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant is not for a wallet handle"})
-		return
+		return nil, false
 	}
 	// Serialize the spend check+record per grant; re-read so Spent is
 	// fresh after another call may have paid.
 	unlock := s.lockGrant(g.ID)
-	defer unlock()
+	ok := false
+	defer func() {
+		if !ok {
+			unlock()
+		}
+	}()
 	if fresh, err := s.st.GetGrant(g.ID); err == nil {
 		g = fresh
 	}
@@ -948,21 +989,21 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
 		s.auditDeny(a.ID, g.Handle, "wallet", "", "bad_url")
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid url"})
-		return
+		return nil, false
 	}
 	target := u.Hostname()
 	var p policy.Policy
 	if err := json.Unmarshal([]byte(g.Policy), &p); err != nil {
 		s.auditDeny(a.ID, g.Handle, "wallet", target, "grant_invalid")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant_invalid"})
-		return
+		return nil, false
 	}
 	// Wallet grants must be scoped to hosts — payment network/amounts are
 	// unknown until the 402 arrives, so host scope is the hard outer fence.
 	if len(p.Hosts) == 0 {
 		s.auditDeny(a.ID, g.Handle, "wallet", target, "unscoped_wallet_grant")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet grant must restrict hosts"})
-		return
+		return nil, false
 	}
 	d := policy.Evaluate(&p, &policy.GrantView{ExpiresAt: g.ExpiresAt, Uses: g.Uses, MaxUses: g.MaxUses, Spent: g.Spent}, policy.Request{
 		Host: target, Method: req.Method, Path: u.Path, Now: time.Now(),
@@ -970,62 +1011,41 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 	if !d.Allow {
 		s.auditDeny(a.ID, g.Handle, "wallet", target, d.Reason)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": d.Reason})
-		return
+		return nil, false
 	}
 	cred, err := s.st.GetCredential(g.Handle)
 	if err != nil {
 		s.auditDeny(a.ID, g.Handle, "wallet", target, "credential_error")
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown handle"})
-		return
+		return nil, false
 	}
-	var meta struct {
-		Provider string `json:"provider"`
-		Address  string `json:"address"`
-		Network  string `json:"network"`
-		Asset    string `json:"asset"`
-	}
+	var meta walletMeta
 	json.Unmarshal([]byte(cred.Metadata), &meta)
 	if meta.Provider != "openfort" || meta.Address == "" || meta.Network == "" {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
-		return
-	}
-	// Resolve the allowed asset contract address. "USDC" (or empty) means
-	// the network's default x402 asset; anything else must be a 0x address.
-	asset := meta.Asset
-	switch {
-	case strings.HasPrefix(asset, "0x"):
-	case asset == "" || strings.EqualFold(asset, "usdc"):
-		cfg, ok := evm.NetworkConfigs[meta.Network]
-		if !ok {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
-			return
-		}
-		asset = cfg.DefaultAsset.Address
-	default:
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
-		return
+		return nil, false
 	}
 	fields, err := s.credValues(cred)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "credential decrypt failed"})
-		return
+		return nil, false
 	}
-	defer func() {
+	of, err := openfort.New(fields["secret_key"], fields["wallet_secret"])
+	if err != nil {
 		for k := range fields {
 			fields[k] = ""
 		}
-	}()
-	of, err := openfort.New(fields["secret_key"], fields["wallet_secret"])
-	if err != nil {
 		slog.Debug("openfort client init failed", "error", err)
 		s.auditDeny(a.ID, g.Handle, "wallet", target, "wallet_error")
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "wallet unavailable"})
-		return
+		return nil, false
 	}
-	accountID := fields["account_id"]
-	if accountID == "" {
+	if fields["account_id"] == "" {
+		for k := range fields {
+			fields[k] = ""
+		}
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet has no account_id"})
-		return
+		return nil, false
 	}
 	// Per-call cap = smallest of the configured ceilings.
 	var capAmt *big.Int
@@ -1046,30 +1066,222 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 	}
 	capAt(req.MaxAmount)
 	if p.Spend != nil && p.Spend.Total > 0 && p.Spend.Total-g.Spent <= 0 {
+		for k := range fields {
+			fields[k] = ""
+		}
 		s.auditDeny(a.ID, g.Handle, "wallet", target, "grant total limit exceeded")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant total limit exceeded"})
+		return nil, false
+	}
+	// Build the chain signers. EVM always present (account_id checked
+	// above); SVM only when the credential carries an svm account pair.
+	signers := wallet.Signers{EVM: wallet.NewSigner(of, fields["account_id"], meta.Address)}
+	if fields["svm_account_id"] != "" {
+		sv, err := wallet.NewSvmSigner(of, fields["svm_account_id"], fields["svm_address"])
+		if err != nil {
+			wipeFields(fields)
+			slog.Debug("svm signer init failed", "error", err)
+			s.auditDeny(a.ID, g.Handle, "wallet", target, "wallet_error")
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet svm metadata incomplete"})
+			return nil, false
+		}
+		signers.SVM = sv
+	}
+	hasSolana := false
+	for _, n := range walletNetworks(meta.Network) {
+		if strings.HasPrefix(n, "solana:") {
+			hasSolana = true
+		}
+	}
+	if hasSolana && signers.SVM == nil {
+		wipeFields(fields)
+		s.auditDeny(a.ID, g.Handle, "wallet", target, "policy_denied")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet has no solana account"})
+		return nil, false
+	}
+	ok = true
+	return &walletCallCtx{
+		g: g, cred: cred, meta: meta, fields: fields, of: of, signers: signers,
+		pol: &p, capAmt: capAmt, target: target, unlock: unlock,
+	}, true
+}
+
+func wipeFields(fields map[string]string) {
+	for k := range fields {
+		fields[k] = ""
+	}
+}
+
+// walletNetworks splits the credential's network metadata, which may be
+// a comma-separated list of eip155 refs.
+func walletNetworks(raw string) []string {
+	var out []string
+	for _, n := range strings.Split(raw, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// walletChainIDs parses the eip155 chain ids out of the network list;
+// only `eip155:<positive int>` entries count — bare numbers or garbage
+// are ignored.
+func walletChainIDs(nets []string) []int64 {
+	var out []int64
+	for _, n := range nets {
+		if !strings.HasPrefix(n, "eip155:") {
+			continue
+		}
+		id, err := strconv.ParseInt(strings.TrimPrefix(n, "eip155:"), 10, 64)
+		if err == nil && id > 0 {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// walletChainAssets resolves the credential's asset metadata into a
+// per-chain currency allowlist for the MPP edge. An explicit 0x asset
+// applies to every chain; empty/USDC resolves to that chain's Tempo
+// defaults.
+func walletChainAssets(nets []string, asset string) map[int64][]string {
+	out := map[int64][]string{}
+	for _, id := range walletChainIDs(nets) {
+		switch {
+		case strings.HasPrefix(asset, "0x"):
+			out[id] = []string{strings.ToLower(asset)}
+		default:
+			var list []string
+			for _, a := range tempo.DefaultCurrenciesForChain(id) {
+				list = append(list, strings.ToLower(a))
+			}
+			out[id] = list
+		}
+	}
+	return out
+}
+
+// walletAllowedAssets resolves the credential's asset metadata into the
+// allowed token contract addresses for every configured network.
+// "USDC" (or empty) means the network's default payment asset: Tempo
+// chains use tempo.DefaultCurrenciesForChain, others use the x402
+// NetworkConfigs default. A 0x address is used verbatim.
+func walletAllowedAssets(nets []string, asset string) ([]string, bool) {
+	if strings.HasPrefix(asset, "0x") {
+		return []string{strings.ToLower(asset)}, true
+	}
+	if asset != "" && !strings.EqualFold(asset, "usdc") {
+		return nil, false
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, n := range nets {
+		var list []string
+		if id, err := strconv.ParseInt(strings.TrimPrefix(n, "eip155:"), 10, 64); err == nil && tempo.IsKnownChainID(id) {
+			list = tempo.DefaultCurrenciesForChain(id)
+		} else if cfg, ok := evm.NetworkConfigs[n]; ok {
+			list = []string{cfg.DefaultAsset.Address}
+		} else if cfg, ok := svm.NetworkConfigs[n]; ok {
+			list = []string{cfg.DefaultAsset.Address}
+		} else {
+			return nil, false
+		}
+		for _, a := range list {
+			if la := strings.ToLower(a); !seen[la] {
+				seen[la] = true
+				out = append(out, la)
+			}
+		}
+	}
+	return out, true
+}
+
+func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Agent) {
+	var req walletRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
-	signer := wallet.NewSigner(of, accountID, meta.Address)
-	res, err := walletFetch(r.Context(), signer, wallet.Request{
+	c, ok := s.walletPrelude(w, r, a, &req)
+	if !ok {
+		return
+	}
+	defer c.unlock()
+	defer wipeFields(c.fields)
+	nets := walletNetworks(c.meta.Network)
+	assets, ok := walletAllowedAssets(nets, c.meta.Asset)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
+		return
+	}
+	res, err := walletFetch(r.Context(), c.signers, wallet.Request{
 		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
 	}, wallet.Policy{
-		MaxAmount: capAmt,
-		Networks:  []string{meta.Network},
-		Assets:    []string{asset},
+		MaxAmount: c.capAmt,
+		Networks:  nets,
+		Assets:    assets,
 	})
 	if err != nil {
 		if errors.Is(err, wallet.ErrPolicy) {
-			s.auditDeny(a.ID, g.Handle, "wallet", target, "policy_denied")
+			s.auditDeny(a.ID, c.g.Handle, "wallet", c.target, "policy_denied")
 			msg := strings.TrimPrefix(err.Error(), wallet.ErrPolicy.Error()+": ")
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": msg})
 			return
 		}
 		slog.Debug("x402 fetch failed", "error", err)
-		s.auditDeny(a.ID, g.Handle, "wallet", target, "fetch_error")
+		s.auditDeny(a.ID, c.g.Handle, "wallet", c.target, "fetch_error")
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetch failed"})
 		return
 	}
+	s.writeWalletResult(w, r, a, c, &req, res, "x402")
+}
+
+func (s *Server) walletMPP(w http.ResponseWriter, r *http.Request, a *store.Agent) {
+	var req walletRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
+		return
+	}
+	c, ok := s.walletPrelude(w, r, a, &req)
+	if !ok {
+		return
+	}
+	defer c.unlock()
+	defer wipeFields(c.fields)
+	nets := walletNetworks(c.meta.Network)
+	assets, ok := walletAllowedAssets(nets, c.meta.Asset)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
+		return
+	}
+	signer := mppedg.WalletSigner(wallet.NewSigner(c.of, c.fields["account_id"], c.meta.Address))
+	res, err := mppFetch(r.Context(), signer, wallet.Request{
+		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
+	}, mppedg.Policy{
+		ChainIDs:    walletChainIDs(nets),
+		Assets:      assets,
+		ChainAssets: walletChainAssets(nets, c.meta.Asset),
+		MaxAmount:   c.capAmt,
+	}, nil)
+	if err != nil {
+		if errors.Is(err, wallet.ErrPolicy) {
+			s.auditDeny(a.ID, c.g.Handle, "wallet", c.target, "policy_denied")
+			msg := strings.TrimPrefix(err.Error(), wallet.ErrPolicy.Error()+": ")
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": msg})
+			return
+		}
+		slog.Debug("mpp fetch failed", "error", err)
+		s.auditDeny(a.ID, c.g.Handle, "wallet", c.target, "fetch_error")
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "fetch failed"})
+		return
+	}
+	s.writeWalletResult(w, r, a, c, &req, res, "mpp")
+}
+
+// writeWalletResult consumes a grant use + records spend only when a
+// payment settled, appends the audit entry, and writes the JSON reply.
+func (s *Server) writeWalletResult(w http.ResponseWriter, r *http.Request, a *store.Agent, c *walletCallCtx, req *walletRequest, res *wallet.Response, protocol string) {
 	status := "ok"
 	switch {
 	case res.Payment != nil:
@@ -1078,21 +1290,21 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 			slog.Debug("grant consume after payment failed", "error", err)
 		}
 		if amt, ok := wallet.Amount(res.Payment); ok && amt.IsInt64() {
-			if err := s.st.AddGrantSpend(g.ID, amt.Int64()); err != nil {
+			if err := s.st.AddGrantSpend(c.g.ID, amt.Int64()); err != nil {
 				slog.Debug("spend record failed", "error", err)
 			}
 		}
 		detail, _ := json.Marshal(map[string]string{
-			"status": "paid", "amount": res.Payment.Amount, "asset": res.Payment.Asset,
+			"status": "paid", "protocol": protocol, "amount": res.Payment.Amount, "asset": res.Payment.Asset,
 			"network": res.Payment.Network, "pay_to": res.Payment.PayTo, "tx": res.Payment.Transaction,
 		})
-		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "wallet", Target: target, Decision: "allow", Detail: string(detail)})
+		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: c.g.Handle, Edge: "wallet", Target: c.target, Decision: "allow", Detail: string(detail)})
 	case res.PaymentAttempted:
-		// Signed but the facilitator rejected it — no money moved, so no
+		// Signed but the payee rejected it — no money moved, so no
 		// grant use or spend is recorded.
-		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "wallet", Target: target, Decision: "allow", Detail: `{"status":"payment_rejected"}`})
+		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: c.g.Handle, Edge: "wallet", Target: c.target, Decision: "allow", Detail: `{"status":"payment_rejected","protocol":"` + protocol + `"}`})
 	default:
-		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "wallet", Target: target, Decision: "allow", Detail: `{"status":"no_payment"}`})
+		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: c.g.Handle, Edge: "wallet", Target: c.target, Decision: "allow", Detail: `{"status":"no_payment","protocol":"` + protocol + `"}`})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": status, "http_status": res.Status, "headers": res.Headers,

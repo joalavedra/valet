@@ -280,10 +280,26 @@ payment receipt.
 
 ```bash
 valet cred add --type wallet --label agent
-# prompts: secret_key, wallet_secret, account_id (optional)
+# prompts: secret_key, wallet_secret, account_id (optional),
+#          svm_account_id (optional), svm_address (optional)
 # leave account_id empty to create a new backend account, or pass
 # --address 0x.. --network eip155:84532 for an existing one
 ```
+
+The same `wallet://` label can also pay on Solana: create a second
+backend wallet with `chainType=SVM` in Openfort, then pass
+`--svm-account-id` + `--svm-address` and list the Solana CAIP-2 network:
+
+```bash
+valet cred add --type wallet --label agent --address 0x.. \
+  --svm-account-id acc_... --svm-address <base58> \
+  --network eip155:84532,solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1
+```
+
+For Solana the edge signs the transaction message via the SVM account
+and the facilitator's `feePayer` co-signs, so the wallet needs no SOL —
+only devnet USDC (https://faucet.circle.com). A credential that lists a
+`solana:` network without an SVM account is denied before any request.
 
 Grant it like a card (host scope is required):
 
@@ -305,6 +321,37 @@ network's default x402 asset) and is
 within `min(per_tx, total-spent, max_amount)`; otherwise the call is
 denied and nothing is signed. Set `VALET_REQUIRE_APPROVAL=card,wallet`
 to require owner approval for wallet grants too.
+
+### MPP (Tempo)
+
+The same `wallet://` credential also answers MPP
+([Machine Payments Protocol](https://paymentauth.org)) challenges —
+`WWW-Authenticate: Payment` with the `tempo`/`charge` method — via
+`POST /v1/edge/wallet/mpp` or the MCP tool:
+
+```
+mpp_fetch(grant, url, method, headers, body, max_amount)
+```
+
+Valet signs a Tempo pull-mode transaction (TIP-20 transfer with
+attribution memo; zero-amount challenges get a proof credential) with the
+same Openfort digest signer — push mode and arbitrary signing are not
+exposed. Only chains listed in the credential's `network` metadata are
+paid; `asset` resolves per chain (on Tempo chains the default
+stablecoins: pathUSD/OUSD on Moderato `eip155:42431`, USDC.e/OUSD on
+mainnet `eip155:4217`).
+
+Configure both protocols on one credential with a comma-separated
+network list:
+
+```bash
+valet cred add --type wallet --label agent --address 0x.. \
+  --network eip155:84532,eip155:42431
+```
+
+For the Tempo Moderato testnet (chain 42431), fund the wallet with
+pathUSD `0x20c0000000000000000000000000000000000000` via the
+`tempo_fundAddress` RPC method on the Moderato RPC.
 
 ## Human approvals & wallet
 

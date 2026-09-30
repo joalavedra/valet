@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io"
@@ -14,12 +15,18 @@ import (
 	"strings"
 	"time"
 
+	solana "github.com/gagliardetto/solana-go"
 	x402 "github.com/x402-foundation/x402/go"
 	x402http "github.com/x402-foundation/x402/go/http"
 	"github.com/x402-foundation/x402/go/mechanisms/evm"
 	exactclient "github.com/x402-foundation/x402/go/mechanisms/evm/exact/client"
 	exactv1 "github.com/x402-foundation/x402/go/mechanisms/evm/exact/v1/client"
 	evmv1 "github.com/x402-foundation/x402/go/mechanisms/evm/v1"
+	"github.com/x402-foundation/x402/go/mechanisms/svm"
+	svmclient "github.com/x402-foundation/x402/go/mechanisms/svm/exact/client"
+	svmv1 "github.com/x402-foundation/x402/go/mechanisms/svm/exact/v1/client"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/joalavedra/valet/internal/edge/egress"
 	"github.com/joalavedra/valet/internal/edge/wallet/openfort"
@@ -56,6 +63,93 @@ func (s *Signer) SignTypedData(ctx context.Context, domain evm.TypedDataDomain, 
 	return s.of.SignHash(ctx, s.accountID, h)
 }
 
+// SignHash signs a raw 32-byte digest via Openfort and returns r||s||v
+// with v normalized to 0/1 (yParity) for MPP/Tempo envelopes.
+func (s *Signer) SignHash(ctx context.Context, hash [32]byte) ([]byte, error) {
+	sig, err := s.of.SignHash(ctx, s.accountID, hash)
+	if err != nil {
+		return nil, err
+	}
+	if sig[64] >= 27 {
+		sig[64] -= 27
+	}
+	return sig, nil
+}
+
+// AddressCommon returns the wallet address as go-ethereum common.Address.
+func (s *Signer) AddressCommon() common.Address {
+	return common.HexToAddress(s.address)
+}
+
+// Signers carries the chain-specific signers Fetch may pay with.
+// Nil signers mean that chain family is unavailable.
+type Signers struct {
+	EVM    evm.ClientEvmSigner
+	SVM    svm.ClientSvmSigner
+	SvmRPC string // optional RPC override for the SVM scheme
+}
+
+// SvmSigner adapts an Openfort backend-wallet client to the x402 SDK's
+// svm.ClientSvmSigner: the serialized transaction message is sent to
+// Openfort for signing and the ed25519 signature is inserted at the
+// signer's account index (the facilitator's feePayer signs separately).
+type SvmSigner struct {
+	of        *openfort.Client
+	accountID string
+	pub       solana.PublicKey
+}
+
+// NewSvmSigner builds a SvmSigner; address is the account's base58
+// Solana address.
+func NewSvmSigner(of *openfort.Client, accountID, address string) (*SvmSigner, error) {
+	pub, err := solana.PublicKeyFromBase58(address)
+	if err != nil {
+		return nil, fmt.Errorf("openfort: bad svm address: %w", err)
+	}
+	return &SvmSigner{of: of, accountID: accountID, pub: pub}, nil
+}
+
+// Address returns the wallet's Solana public key.
+func (s *SvmSigner) Address() solana.PublicKey { return s.pub }
+
+// SignTransaction partially signs tx: it signs the serialized message
+// via Openfort and inserts the signature at the signer's index among
+// the required signers. Any signature already at that slot is replaced.
+func (s *SvmSigner) SignTransaction(ctx context.Context, tx *solana.Transaction) error {
+	msg, err := tx.Message.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("openfort: marshal message: %w", err)
+	}
+	sig, err := s.of.SignBytes(ctx, s.accountID, msg)
+	if err != nil {
+		return err
+	}
+	if len(sig) != ed25519.SignatureSize {
+		return fmt.Errorf("openfort: svm signature length %d != 64", len(sig))
+	}
+	if !ed25519.Verify(s.pub[:], msg, sig) {
+		return fmt.Errorf("openfort: signature does not verify for %s", s.pub.String())
+	}
+	required := int(tx.Message.Header.NumRequiredSignatures)
+	idx := -1
+	for i := 0; i < required && i < len(tx.Message.AccountKeys); i++ {
+		if tx.Message.AccountKeys[i] == s.pub {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("openfort: %s is not a required signer", s.pub.String())
+	}
+	if len(tx.Signatures) < required {
+		newSigs := make([]solana.Signature, required)
+		copy(newSigs, tx.Signatures)
+		tx.Signatures = newSigs
+	}
+	copy(tx.Signatures[idx][:], sig)
+	return nil
+}
+
 // Policy constrains which payment requirements Fetch may fulfill.
 type Policy struct {
 	MaxAmount *big.Int // per call, asset minor units (USDC 6dp); nil = no cap
@@ -74,6 +168,9 @@ type Request struct {
 
 // PaymentInfo is the receipt of a settled x402 payment.
 type PaymentInfo struct {
+	Protocol    string `json:"protocol,omitempty"`
+	Method      string `json:"method,omitempty"`
+	Receipt     string `json:"receipt,omitempty"`
 	Network     string `json:"network"`
 	Asset       string `json:"asset"`
 	PayTo       string `json:"pay_to"`
@@ -110,7 +207,7 @@ func Amount(p *PaymentInfo) (*big.Int, bool) {
 // Fetch performs req, paying an x402 challenge when the server's offer
 // satisfies pol. A non-402 response passes through unpaid. Refusals are
 // ErrPolicy-wrapped; signing never happens for disallowed requirements.
-func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Policy) (*Response, error) {
+func Fetch(ctx context.Context, signers Signers, req Request, pol Policy) (*Response, error) {
 	if len(pol.Networks) == 0 {
 		return nil, fmt.Errorf("%w: no networks allowed", ErrPolicy)
 	}
@@ -154,10 +251,22 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 			return sel
 		}),
 	).
-		Register("eip155:*", exactclient.NewExactEvmScheme(signer, nil)).
 		RegisterPolicy(allowed)
-	for _, n := range evmv1.Networks {
-		client.RegisterV1(x402.Network(n), exactv1.NewExactEvmSchemeV1(signer))
+	if signers.EVM != nil {
+		client.Register("eip155:*", exactclient.NewExactEvmScheme(signers.EVM, nil))
+		for _, n := range evmv1.Networks {
+			client.RegisterV1(x402.Network(n), exactv1.NewExactEvmSchemeV1(signers.EVM))
+		}
+	}
+	if signers.SVM != nil {
+		var cfg *svm.ClientConfig
+		if signers.SvmRPC != "" {
+			cfg = &svm.ClientConfig{RPCURL: signers.SvmRPC}
+		}
+		client.Register("solana:*", svmclient.NewExactSvmScheme(signers.SVM, cfg))
+		for _, n := range []string{svm.SolanaMainnetV1, svm.SolanaDevnetV1, svm.SolanaTestnetV1} {
+			client.RegisterV1(x402.Network(n), svmv1.NewExactSvmSchemeV1(signers.SVM, cfg))
+		}
 	}
 	hc := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -194,7 +303,15 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 	if err != nil {
 		var pe *x402.PaymentError
 		if errors.As(err, &pe) {
-			return nil, fmt.Errorf("%w: %s", ErrPolicy, scrubErr(err))
+			return nil, fmt.Errorf("%w: %s", ErrPolicy, ScrubErr(err))
+		}
+		// The payment signature was already sent and the conn died — the
+		// upstream may still settle; conservatively count it as paid.
+		if paidView.network != "" {
+			return &Response{Status: 0, PaymentAttempted: true, Payment: &PaymentInfo{
+				Network: paidView.network, Asset: paidView.asset,
+				PayTo: paidView.payTo, Amount: paidView.amount,
+			}}, nil
 		}
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}
@@ -266,8 +383,11 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 // caip2 normalizes a requirement network to CAIP-2 form; v1 servers
 // still use legacy names ("base-sepolia") which map to "eip155:<id>".
 func caip2(network string) string {
-	if strings.HasPrefix(network, "eip155:") {
+	if strings.HasPrefix(network, "eip155:") || strings.HasPrefix(network, "solana:") {
 		return network
+	}
+	if cn, err := svm.NormalizeNetwork(network); err == nil {
+		return cn
 	}
 	if id, err := evmv1.GetEvmChainId(network); err == nil {
 		return "eip155:" + id.String()
@@ -284,9 +404,9 @@ func matchCI(list []string, v string) bool {
 	return false
 }
 
-// scrubErr shortens SDK errors to a single line, dropping any base64
+// ScrubErr shortens SDK errors to a single line, dropping any base64
 // blobs that would leak the payment payload into agent-visible errors.
-func scrubErr(err error) string {
+func ScrubErr(err error) string {
 	s := err.Error()
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]

@@ -27,6 +27,7 @@ type Backend interface {
 	HTTPCall(ctx context.Context, grant, method, url, headersJSON, body string) (any, error)
 	Pay(ctx context.Context, grant, url, method string, headers map[string]string, body string, amount int64, currency string) (any, error)
 	X402Fetch(ctx context.Context, grant, url, method string, headers map[string]string, body string, maxAmount int64) (any, error)
+	MPPFetch(ctx context.Context, grant, url, method string, headers map[string]string, body string, maxAmount int64) (any, error)
 }
 
 // HTTPBackend forwards tool calls to a running valet server.
@@ -285,6 +286,28 @@ type x402FetchArgs struct {
 	MaxAmount int64             `json:"max_amount,omitempty" jsonschema:"max USDC minor units (6dp) to pay for this call; 0 = grant cap only"`
 }
 
+func (b *HTTPBackend) MPPFetch(ctx context.Context, grant, url, method string, headers map[string]string, body string, maxAmount int64) (any, error) {
+	var out any
+	payload := map[string]any{
+		"grant_token": grant, "url": url, "method": method,
+		"body": body, "max_amount": maxAmount,
+	}
+	if len(headers) > 0 {
+		payload["headers"] = headers
+	}
+	err := b.call(ctx, "POST", "/v1/edge/wallet/mpp", payload, &out)
+	return out, err
+}
+
+type mppFetchArgs struct {
+	Grant     string            `json:"grant" jsonschema:"grant token for a wallet:// handle"`
+	URL       string            `json:"url" jsonschema:"absolute https URL to fetch"`
+	Method    string            `json:"method,omitempty" jsonschema:"HTTP method, default GET"`
+	Headers   map[string]string `json:"headers,omitempty" jsonschema:"extra request headers"`
+	Body      string            `json:"body,omitempty" jsonschema:"request body"`
+	MaxAmount int64             `json:"max_amount,omitempty" jsonschema:"max token base units to pay for this call; 0 = grant cap only"`
+}
+
 type payArgs struct {
 	Grant    string            `json:"grant" jsonschema:"grant token"`
 	URL      string            `json:"url" jsonschema:"merchant payment API URL (https)"`
@@ -341,6 +364,10 @@ func New(b Backend) *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{Name: "x402_fetch", Description: "Fetch an HTTP resource, paying x402 `402 Payment Required` challenges in USDC from the wallet behind a wallet:// grant. Returns status, http_status, filtered headers, redacted body and payment receipt (network, amount, recipient, tx hash) — never keys."},
 		func(ctx context.Context, req *mcp.CallToolRequest, args x402FetchArgs) (*mcp.CallToolResult, any, error) {
 			return result(b.X402Fetch(ctx, args.Grant, args.URL, args.Method, args.Headers, args.Body, args.MaxAmount))
+		})
+	mcp.AddTool(s, &mcp.Tool{Name: "mpp_fetch", Description: "Fetch an HTTP resource, paying MPP `402 Payment Required` challenges (WWW-Authenticate: Payment) as Tempo charge transactions from the wallet behind a wallet:// grant. Returns status, http_status, filtered headers, redacted body and payment receipt (network, amount, recipient, tx hash) — never keys."},
+		func(ctx context.Context, req *mcp.CallToolRequest, args mppFetchArgs) (*mcp.CallToolResult, any, error) {
+			return result(b.MPPFetch(ctx, args.Grant, args.URL, args.Method, args.Headers, args.Body, args.MaxAmount))
 		})
 	return s
 }
