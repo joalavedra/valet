@@ -27,9 +27,11 @@ import (
 	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
 	"github.com/joalavedra/valet/internal/edge/wallet"
+	mppedg "github.com/joalavedra/valet/internal/edge/wallet/mpp"
 	"github.com/joalavedra/valet/internal/grant"
 	"github.com/joalavedra/valet/internal/handle"
 	"github.com/joalavedra/valet/internal/store"
+	"github.com/tempoxyz/mpp-go/pkg/tempo"
 	"github.com/x402-foundation/x402/go/mechanisms/evm"
 )
 
@@ -2017,5 +2019,208 @@ func TestOwnerGrantsSpentAndActive(t *testing.T) {
 	}
 	if wg == nil || wg.Spent != 15 {
 		t.Fatal("spent not surfaced")
+	}
+}
+
+func addWalletCredNet(t *testing.T, srv *Server, st *store.SQLite, handle_, network string) {
+	t.Helper()
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(k)
+	pt, _ := json.Marshal(map[string]string{
+		"secret_key": "sk_test_x", "wallet_secret": base64.StdEncoding.EncodeToString(der), "account_id": "acc_x",
+	})
+	ct, err := crypto.Encrypt(srv.dek, pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := json.Marshal(map[string]string{
+		"provider": "openfort", "address": "0xabc", "network": network, "asset": "USDC",
+	})
+	err = st.AddCredential(&store.Credential{
+		Handle: handle_, Type: "wallet", Label: handle_, Metadata: string(meta), Ciphertext: ct,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mppReq(t *testing.T, srv *Server, agentTok string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/v1/edge/wallet/mpp", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+agentTok)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestWalletMPP(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCredNet(t, srv, st, "wallet://agent", "eip155:42431")
+	orig := mppFetch
+	defer func() { mppFetch = orig }()
+	var gotPol mppedg.Policy
+	mppFetch = func(ctx context.Context, s mppedg.HashSigner, req wallet.Request, pol mppedg.Policy, rpc tempo.RPCClient) (*wallet.Response, error) {
+		gotPol = pol
+		return &wallet.Response{Status: 200, PaymentAttempted: true, Payment: &wallet.PaymentInfo{
+			Protocol: "mpp", Method: "tempo", Network: "eip155:42431",
+			Asset: "0x20c0000000000000000000000000000000000000", PayTo: "0xp",
+			Amount: "10000", Transaction: "0xmpp",
+		}}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"],"spend":{"total":100000}}`, time.Hour)
+	rec := mppReq(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Status  string `json:"status"`
+		Payment *struct {
+			Protocol    string `json:"protocol"`
+			Transaction string `json:"transaction"`
+		} `json:"payment"`
+	}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if out.Status != "paid" || out.Payment == nil || out.Payment.Protocol != "mpp" || out.Payment.Transaction != "0xmpp" {
+		t.Fatalf("bad response %s", rec.Body)
+	}
+	if len(gotPol.ChainIDs) != 1 || gotPol.ChainIDs[0] != 42431 {
+		t.Fatalf("chain ids %v", gotPol.ChainIDs)
+	}
+	// Tempo chain assets resolve via DefaultCurrenciesForChain (pathUSD + OUSD).
+	if len(gotPol.Assets) != 2 {
+		t.Fatalf("assets %v", gotPol.Assets)
+	}
+	tokID, _, _ := strings.Cut(tok, ".")
+	g, _ := st.GetGrant(tokID)
+	if g.Spent != 10000 || g.Uses != 1 {
+		t.Fatalf("spent=%d uses=%d", g.Spent, g.Uses)
+	}
+}
+
+func TestWalletMPPDenies(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCredNet(t, srv, st, "wallet://agent", "eip155:42431")
+	orig := mppFetch
+	defer func() { mppFetch = orig }()
+	signed := false
+	mppFetch = func(ctx context.Context, s mppedg.HashSigner, req wallet.Request, pol mppedg.Policy, rpc tempo.RPCClient) (*wallet.Response, error) {
+		if pol.MaxAmount != nil && pol.MaxAmount.Int64() < 10000 {
+			return nil, fmt.Errorf("%w: amount exceeds cap", wallet.ErrPolicy)
+		}
+		signed = true
+		return &wallet.Response{Status: 200}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"],"spend":{"total":100000}}`, time.Hour)
+	rec := mppReq(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x", "max_amount": 5000,
+	})
+	if rec.Code != 403 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if signed {
+		t.Fatal("signed despite cap")
+	}
+	tokID, _, _ := strings.Cut(tok, ".")
+	g, _ := st.GetGrant(tokID)
+	if g.Spent != 0 || g.Uses != 0 {
+		t.Fatalf("spent=%d uses=%d", g.Spent, g.Uses)
+	}
+}
+
+func TestWalletNetworkListParses(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCredNet(t, srv, st, "wallet://multi", "eip155:84532,eip155:42431")
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	var gotPol wallet.Policy
+	walletFetch = func(ctx context.Context, s evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		gotPol = pol
+		return &wallet.Response{Status: 200}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://multi",
+		`{"hosts":["api.example.com"]}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if len(gotPol.Networks) != 2 {
+		t.Fatalf("networks %v", gotPol.Networks)
+	}
+	// USDC on 84532 + pathUSD/OUSD on 42431.
+	if len(gotPol.Assets) != 3 {
+		t.Fatalf("assets %v", gotPol.Assets)
+	}
+}
+
+func TestWalletChainIDsStrict(t *testing.T) {
+	got := walletChainIDs([]string{"eip155:84532", "4217", "solana:dev", "eip155:-1", "eip155:0", "eip155:abc", "", "eip155:42431"})
+	want := []int64{84532, 42431}
+	if len(got) != len(want) {
+		t.Fatalf("chain ids %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("chain ids %v", got)
+		}
+	}
+}
+
+func TestWalletChainAssetsPerChain(t *testing.T) {
+	// Empty/USDC resolves to each chain's own Tempo defaults.
+	ca := walletChainAssets([]string{"eip155:42431", "eip155:4217"}, "USDC")
+	pA := tempo.DefaultCurrenciesForChain(42431)
+	if len(ca[42431]) != len(pA) || len(ca[4217]) == 0 {
+		t.Fatalf("chain assets %v", ca)
+	}
+	if ca[42431][0] == ca[4217][0] && len(pA) == 1 {
+		t.Fatalf("chains share default unexpectedly %v", ca)
+	}
+	// Explicit asset applies to every chain.
+	ca2 := walletChainAssets([]string{"eip155:42431", "eip155:1"}, "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF")
+	if len(ca2[42431]) != 1 || len(ca2[1]) != 1 || ca2[1][0] != "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" {
+		t.Fatalf("explicit chain assets %v", ca2)
+	}
+}
+
+// A Response with Status 0 but a Payment (conn lost after paying) must
+// still record the grant use + spend.
+func TestWalletX402LostResponseStillCounts(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		return &wallet.Response{Status: 0, PaymentAttempted: true, Payment: &wallet.PaymentInfo{
+			Network: "eip155:84532", Asset: "0xusdc", PayTo: "0xp", Amount: "700", Transaction: "0xt",
+		}}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"],"spend":{"total":2000}}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Status string `json:"status"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.Status != "paid" {
+		t.Fatalf("want paid got %s", rec.Body)
+	}
+	g, err := st.GetGrant(strings.SplitN(tok, ".", 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Uses != 1 || g.Spent != 700 {
+		t.Fatalf("uses=%d spent=%d", g.Uses, g.Spent)
 	}
 }

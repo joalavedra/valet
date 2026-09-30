@@ -154,6 +154,10 @@ func (stubBackend) X402Fetch(ctx context.Context, grant, url, method string, hea
 	return map[string]any{"status": "paid"}, nil
 }
 
+func (stubBackend) MPPFetch(ctx context.Context, grant, url, method string, headers map[string]string, body string, maxAmount int64) (any, error) {
+	return map[string]any{"status": "paid"}, nil
+}
+
 func (stubBackend) Pay(ctx context.Context, grant, url, method string, headers map[string]string, body string, amount int64, currency string) (any, error) {
 	return nil, nil
 }
