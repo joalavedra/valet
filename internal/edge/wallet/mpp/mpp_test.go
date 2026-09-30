@@ -3,6 +3,7 @@ package mpp
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -344,12 +345,8 @@ func TestFetchDeniesBeforeSigning(t *testing.T) {
 	pol.MaxAmount = big.NewInt(1) // under the 0.01 amount
 	res, err := Fetch(context.Background(), s, wallet.Request{Method: "GET", URL: srv.URL},
 		pol, &fakeRPC{chainID: uint64(testChain)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// No candidate → passthrough 402, no signature.
-	if res.Status != 402 || res.PaymentAttempted || res.Payment != nil {
-		t.Fatalf("%+v", res)
+	if err == nil || !errors.Is(err, wallet.ErrPolicy) {
+		t.Fatalf("expected ErrPolicy, got res=%+v err=%v", res, err)
 	}
 	if s.callCount() != 0 {
 		t.Fatal("signer called")

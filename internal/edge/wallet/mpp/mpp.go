@@ -560,6 +560,20 @@ func Fetch(ctx context.Context, signer HashSigner, req wallet.Request, pol Polic
 		}
 	}
 	out.PaymentAttempted = paid != nil
+	// A terminal 402 we refused to pay: surface the policy denial (like
+	// the x402 edge) instead of echoing the upstream challenge.
+	if paid == nil && resp.StatusCode == http.StatusPaymentRequired {
+		for _, hdr := range resp.Header.Values(mpp.HeaderWWWAuthenticate) {
+			ch, err := mpp.ParseChallenge(hdr)
+			if err != nil || ch == nil || ch.Method != tempo.MethodName || ch.Intent != tempo.IntentCharge {
+				continue
+			}
+			if err := method.checkPolicy(ch); err != nil {
+				return nil, fmt.Errorf("%w: %s", wallet.ErrPolicy, err)
+			}
+			return nil, fmt.Errorf("%w: tempo charge could not be fulfilled", wallet.ErrPolicy)
+		}
+	}
 	if paid != nil && resp.StatusCode != http.StatusPaymentRequired {
 		out.Payment = paymentFrom(paid, "")
 		// The receipt (tx reference) rides in Payment-Receipt —
