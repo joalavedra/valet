@@ -288,7 +288,8 @@ x402_fetch(grant, url, method, headers, body, max_amount)
 
 returns `{status:"ok"|"paid", http_status, headers, body, payment:
 {network, asset, pay_to, amount, transaction}}`. The edge only pays when
-the server's offer matches the wallet's configured network/asset and is
+the server's offer matches the wallet's configured network and USDC (the
+network's default x402 asset) and is
 within `min(per_tx, total-spent, max_amount)`; otherwise the call is
 denied and nothing is signed. Set `VALET_REQUIRE_APPROVAL=card,wallet`
 to require owner approval for wallet grants too.

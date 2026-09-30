@@ -1524,6 +1524,10 @@ func TestWalletX402(t *testing.T) {
 	if len(gotPol.Networks) != 1 || gotPol.Networks[0] != "eip155:84532" {
 		t.Fatalf("bad networks %v", gotPol.Networks)
 	}
+	// "USDC" metadata resolves to the network's default asset address.
+	if len(gotPol.Assets) != 1 || !strings.EqualFold(gotPol.Assets[0], "0x036CbD53842c5426634e7929541eC2318f3dCF7e") {
+		t.Fatalf("bad assets %v", gotPol.Assets)
+	}
 	if gotPol.MaxAmount == nil || gotPol.MaxAmount.Int64() != 1000 {
 		t.Fatalf("bad cap %v", gotPol.MaxAmount)
 	}
@@ -1597,5 +1601,47 @@ func TestWalletX402Denies(t *testing.T) {
 	})
 	if rec.Code != 403 {
 		t.Fatalf("policy: want 403 got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestWalletX402PaymentRejected(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		return &wallet.Response{Status: 402, PaymentAttempted: true}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"],"spend":{"per_tx":1000,"total":2000}}`, time.Hour)
+	tokID, _, _ := strings.Cut(tok, ".")
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("want 200 got %d %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Status  string `json:"status"`
+		Payment any    `json:"payment"`
+	}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if out.Status != "ok" || out.Payment != nil {
+		t.Fatalf("bad response %s", rec.Body)
+	}
+	g, _ := st.GetGrant(tokID)
+	if g.Spent != 0 || g.Uses != 0 {
+		t.Fatalf("rejected payment recorded: spent=%d uses=%d", g.Spent, g.Uses)
+	}
+	// Audit shows payment_rejected.
+	audits, _ := st.ListAudit(10)
+	found := false
+	for _, a := range audits {
+		if a.Edge == "wallet" && strings.Contains(a.Detail, "payment_rejected") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no payment_rejected audit")
 	}
 }

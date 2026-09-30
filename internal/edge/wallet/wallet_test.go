@@ -302,3 +302,36 @@ func (c *countingSigner) SignTypedData(ctx context.Context, d evm.TypedDataDomai
 	c.calls++
 	return c.inner.SignTypedData(ctx, d, t, p, m)
 }
+
+func TestFetchPaymentRejected(t *testing.T) {
+	// Facilitator rejects: second request also answers 402.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req := x402.PaymentRequirements{
+			Scheme: "exact", Network: testNet, Asset: testAsset,
+			Amount: "1000", PayTo: testPayTo, MaxTimeoutSeconds: 300,
+			Extra: map[string]interface{}{"name": "USD Coin", "version": "2"},
+		}
+		pr, _ := json.Marshal(x402.PaymentRequired{X402Version: 2, Accepts: []x402.PaymentRequirements{req}})
+		w.Header().Set("PAYMENT-REQUIRED", base64.StdEncoding.EncodeToString(pr))
+		w.WriteHeader(402)
+	}))
+	defer srv.Close()
+	s := &countingSigner{inner: testSigner(t)}
+	res, err := Fetch(context.Background(), s, Request{Method: "GET", URL: srv.URL},
+		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.calls == 0 {
+		t.Fatal("signer never called")
+	}
+	if res.Status != 402 {
+		t.Fatalf("status %d", res.Status)
+	}
+	if res.Payment != nil {
+		t.Fatalf("payment recorded for rejected settle: %+v", res.Payment)
+	}
+	if !res.PaymentAttempted {
+		t.Fatal("PaymentAttempted false")
+	}
+}

@@ -890,6 +890,22 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
 		return
 	}
+	// Resolve the allowed asset contract address. "USDC" (or empty) means
+	// the network's default x402 asset; anything else must be a 0x address.
+	asset := meta.Asset
+	switch {
+	case strings.HasPrefix(asset, "0x"):
+	case asset == "" || strings.EqualFold(asset, "usdc"):
+		cfg, ok := evm.NetworkConfigs[meta.Network]
+		if !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
+			return
+		}
+		asset = cfg.DefaultAsset.Address
+	default:
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
+		return
+	}
 	fields, err := s.credValues(cred)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "credential decrypt failed"})
@@ -941,7 +957,7 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 	}, wallet.Policy{
 		MaxAmount: capAmt,
 		Networks:  []string{meta.Network},
-		Assets:    []string{meta.Asset},
+		Assets:    []string{asset},
 	})
 	if err != nil {
 		if errors.Is(err, wallet.ErrPolicy) {
@@ -955,7 +971,8 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 		return
 	}
 	status := "ok"
-	if res.Payment != nil {
+	switch {
+	case res.Payment != nil:
 		status = "paid"
 		if _, err := s.issuer.Consume(req.GrantToken, a.ID); err != nil {
 			slog.Debug("grant consume after payment failed", "error", err)
@@ -970,7 +987,11 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 			"network": res.Payment.Network, "pay_to": res.Payment.PayTo, "tx": res.Payment.Transaction,
 		})
 		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "wallet", Target: target, Decision: "allow", Detail: string(detail)})
-	} else {
+	case res.PaymentAttempted:
+		// Signed but the facilitator rejected it — no money moved, so no
+		// grant use or spend is recorded.
+		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "wallet", Target: target, Decision: "allow", Detail: `{"status":"payment_rejected"}`})
+	default:
 		_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: g.Handle, Edge: "wallet", Target: target, Decision: "allow", Detail: `{"status":"no_payment"}`})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

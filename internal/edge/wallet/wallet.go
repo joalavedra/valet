@@ -91,6 +91,9 @@ type Response struct {
 	Redacted  bool              `json:"redacted,omitempty"`
 	Truncated bool              `json:"truncated,omitempty"`
 	Payment   *PaymentInfo      `json:"payment,omitempty"`
+	// PaymentAttempted is true when a requirement was selected and a
+	// payment signature was sent, regardless of the outcome.
+	PaymentAttempted bool `json:"payment_attempted,omitempty"`
 }
 
 const maxBody = 1 << 20
@@ -183,7 +186,7 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 	resp, err := hc.Do(hreq)
 	if err != nil {
 		var pe *x402.PaymentError
-		if errors.As(err, &pe) || paidView.network == "" && strings.Contains(err.Error(), "payment") {
+		if errors.As(err, &pe) {
 			return nil, fmt.Errorf("%w: %s", ErrPolicy, scrubErr(err))
 		}
 		return nil, fmt.Errorf("fetch failed: %w", err)
@@ -208,7 +211,11 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 			out.Headers[k] = v
 		}
 	}
-	if paidView.network != "" {
+	// A payment counts only when the retry succeeded — a requirement was
+	// selected AND the final response isn't another 402. A terminal 402
+	// after signing means the facilitator rejected the payment.
+	out.PaymentAttempted = paidView.network != ""
+	if paidView.network != "" && resp.StatusCode != http.StatusPaymentRequired {
 		out.Payment = &PaymentInfo{
 			Network: paidView.network, Asset: paidView.asset,
 			PayTo: paidView.payTo, Amount: paidView.amount,
