@@ -22,6 +22,7 @@ import (
 	evmv1 "github.com/x402-foundation/x402/go/mechanisms/evm/v1"
 
 	"github.com/joalavedra/valet/internal/edge/egress"
+	"github.com/joalavedra/valet/internal/edge/netguard"
 	"github.com/joalavedra/valet/internal/edge/wallet/openfort"
 )
 
@@ -62,6 +63,9 @@ type Policy struct {
 	Networks  []string // allowed CAIP-2 networks, e.g. "eip155:84532"; empty = deny all
 	Assets    []string // allowed asset contract addresses (lowercase); empty = any
 	PayTo     []string // allowed recipients (lowercase); empty = any
+	// AllowPrivate permits dialing non-publicly-routable upstreams
+	// (loopback, RFC1918, link-local). Default false = SSRF hard fence.
+	AllowPrivate bool
 }
 
 // Request is one HTTP request the edge makes on the agent's behalf.
@@ -162,6 +166,7 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 	hc := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
+	hc.Transport = netguard.Transport(pol.AllowPrivate)
 	x402http.WrapHTTPClientWithPayment(hc, x402http.Newx402HTTPClient(client))
 
 	method := strings.ToUpper(req.Method)
@@ -194,6 +199,9 @@ func Fetch(ctx context.Context, signer evm.ClientEvmSigner, req Request, pol Pol
 	if err != nil {
 		var pe *x402.PaymentError
 		if errors.As(err, &pe) {
+			return nil, fmt.Errorf("%w: %s", ErrPolicy, scrubErr(err))
+		}
+		if errors.Is(err, netguard.ErrBlocked) {
 			return nil, fmt.Errorf("%w: %s", ErrPolicy, scrubErr(err))
 		}
 		return nil, fmt.Errorf("fetch failed: %w", err)

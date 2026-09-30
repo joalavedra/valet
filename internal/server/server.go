@@ -54,6 +54,9 @@ type Server struct {
 	cardProv   card.Provider
 	mux        *http.ServeMux
 
+	// allowPrivate lets wallet edges dial non-publicly-routable upstreams
+	// (VALET_ALLOW_PRIVATE_UPSTREAMS=1); default is the SSRF hard fence.
+	allowPrivate bool
 	// approvalMode is "card" (default), "all", or "none".
 	approvalMode   string
 	approvalTTL    time.Duration
@@ -109,6 +112,7 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 		approvalMode: mode, approvalTTL: approvalTTL,
 		approvalNotify: os.Getenv("VALET_APPROVAL_WEBHOOK"),
 		ownerToken:     os.Getenv("VALET_OWNER_TOKEN"),
+		allowPrivate:   os.Getenv("VALET_ALLOW_PRIVATE_UPSTREAMS") == "1",
 		waiters:        map[string]*waiter{},
 	}
 	s.captureReturnOrigins = parseOrigins(os.Getenv("VALET_CAPTURE_RETURN_ORIGINS"))
@@ -1054,9 +1058,10 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 	res, err := walletFetch(r.Context(), signer, wallet.Request{
 		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
 	}, wallet.Policy{
-		MaxAmount: capAmt,
-		Networks:  []string{meta.Network},
-		Assets:    []string{asset},
+		MaxAmount:    capAmt,
+		Networks:     []string{meta.Network},
+		Assets:       []string{asset},
+		AllowPrivate: s.allowPrivate,
 	})
 	if err != nil {
 		if errors.Is(err, wallet.ErrPolicy) {

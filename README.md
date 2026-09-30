@@ -323,9 +323,17 @@ Configuration (environment):
 | `VALET_OWNER_TOKEN` | Extra bearer token accepted for owner endpoints (alongside `VALET_MASTER_PASSWORD`). |
 | `VALET_PUBLIC_URL` | Public base URL used to build `approve_url` links; relative when unset. |
 | `VALET_CAPTURE_RETURN_ORIGINS` | Comma-separated origins allowed as capture `return_url` targets. Defaults to the `VALET_PUBLIC_URL` origin; when neither is set, any non-empty `return_url` is rejected. |
+| `VALET_ALLOW_PRIVATE_UPSTREAMS` | `1` lets the wallet edges dial non-publicly-routable hosts (LAN/loopback test resources). Default `0`. |
 
 Pages: `GET /wallet` (all pending requests + active grants) and
 `GET /approve/<id>` serve the bundled `wallet.html` SPA.
+
+**Security.** The wallet edges (x402/MPP) refuse to dial
+non-publicly-routable upstreams — loopback, RFC1918, link-local, CGNAT,
+cloud-metadata (169.254.169.254) and reserved ranges — so a hostile
+402 can't aim an agent's grant at the internal network. Set
+`VALET_ALLOW_PRIVATE_UPSTREAMS=1` only when paid resources live on a
+LAN/test network.
 
 Owner API (bearer = master password or `VALET_OWNER_TOKEN`):
 

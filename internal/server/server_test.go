@@ -2019,3 +2019,56 @@ func TestOwnerGrantsSpentAndActive(t *testing.T) {
 		t.Fatal("spent not surfaced")
 	}
 }
+
+// The wallet edge refuses non-public upstreams by default → 403, no
+// grant use or spend.
+func TestWalletX402BlocksPrivateUpstream(t *testing.T) {
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	walletFetch = wallet.Fetch // real edge
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["127.0.0.1","localhost"],"spend":{"total":2000}}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": upstream.URL + "/x", "method": "GET",
+	})
+	if rec.Code != 403 {
+		t.Fatalf("want 403 got %d %s", rec.Code, rec.Body)
+	}
+	g, err := st.GetGrant(strings.SplitN(tok, ".", 2)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Uses != 0 || g.Spent != 0 {
+		t.Fatalf("uses=%d spent=%d", g.Uses, g.Spent)
+	}
+}
+
+func TestWalletX402AllowPrivateEnv(t *testing.T) {
+	t.Setenv("VALET_ALLOW_PRIVATE_UPSTREAMS", "1")
+	srv, st, agentTok := testServer(t)
+	addWalletCred(t, srv, st)
+	orig := walletFetch
+	defer func() { walletFetch = orig }()
+	var gotPol wallet.Policy
+	walletFetch = func(ctx context.Context, signer evm.ClientEvmSigner, req wallet.Request, pol wallet.Policy) (*wallet.Response, error) {
+		gotPol = pol
+		return &wallet.Response{Status: 200}, nil
+	}
+	tok := issueGrantHandle(t, srv, st, agentTok, "wallet://agent",
+		`{"hosts":["api.example.com"]}`, time.Hour)
+	rec := x402Req(t, srv, agentTok, map[string]any{
+		"grant_token": tok, "url": "https://api.example.com/x", "method": "GET",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if !gotPol.AllowPrivate {
+		t.Fatal("AllowPrivate not propagated")
+	}
+}
