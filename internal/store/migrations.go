@@ -11,4 +11,7 @@ var capturesSQL string
 //go:embed migrations/003_approvals.sql
 var approvalsSQL string
 
-var migrations = []string{initSQL, capturesSQL, approvalsSQL}
+//go:embed migrations/004_grant_spent.sql
+var grantSpentSQL string
+
+var migrations = []string{initSQL, capturesSQL, approvalsSQL, grantSpentSQL}

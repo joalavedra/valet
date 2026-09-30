@@ -139,7 +139,7 @@ func (s *SQLite) AddGrant(g *Grant) error {
 func (s *SQLite) scanGrant(row interface{ Scan(...any) error }) (*Grant, error) {
 	g := &Grant{}
 	var revokedAt sql.NullTime
-	err := row.Scan(&g.ID, &g.AgentID, &g.Handle, &g.Policy, &g.ExpiresAt, &g.MaxUses, &g.Uses, &revokedAt, &g.CreatedAt)
+	err := row.Scan(&g.ID, &g.AgentID, &g.Handle, &g.Policy, &g.ExpiresAt, &g.MaxUses, &g.Uses, &revokedAt, &g.Spent, &g.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -154,12 +154,12 @@ func (s *SQLite) scanGrant(row interface{ Scan(...any) error }) (*Grant, error) 
 
 func (s *SQLite) GetGrant(id string) (*Grant, error) {
 	return s.scanGrant(s.db.QueryRow(
-		`SELECT id, agent_id, handle, policy_json, expires_at, max_uses, uses, revoked_at, created_at FROM grants WHERE id = ?`, id))
+		`SELECT id, agent_id, handle, policy_json, expires_at, max_uses, uses, revoked_at, spent, created_at FROM grants WHERE id = ?`, id))
 }
 
 func (s *SQLite) ListGrants() ([]Grant, error) {
 	rows, err := s.db.Query(
-		`SELECT id, agent_id, handle, policy_json, expires_at, max_uses, uses, revoked_at, created_at FROM grants ORDER BY created_at DESC`)
+		`SELECT id, agent_id, handle, policy_json, expires_at, max_uses, uses, revoked_at, spent, created_at FROM grants ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +178,18 @@ func (s *SQLite) ListGrants() ([]Grant, error) {
 func (s *SQLite) IncrementGrantUses(id string) error {
 	_, err := s.db.Exec(`UPDATE grants SET uses = uses + 1 WHERE id = ?`, id)
 	return err
+}
+
+// AddGrantSpend atomically accumulates amount into a grant's spent total.
+func (s *SQLite) AddGrantSpend(id string, amount int64) error {
+	res, err := s.db.Exec(`UPDATE grants SET spent = spent + ? WHERE id = ?`, amount, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // RevokeGrant marks a grant revoked once; a second revoke (or unknown id)
