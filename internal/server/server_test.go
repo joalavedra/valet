@@ -2405,3 +2405,30 @@ func TestWalletMPPBlocksPrivateUpstream(t *testing.T) {
 		t.Fatalf("uses=%d spent=%d", g.Uses, g.Spent)
 	}
 }
+
+func TestWalletNetworkAssetsPerNetwork(t *testing.T) {
+	nets := []string{"eip155:84532", "eip155:42431"}
+	m, ok := walletNetworkAssets(nets, "")
+	if !ok || len(m["eip155:84532"]) == 0 || len(m["eip155:42431"]) == 0 {
+		t.Fatalf("bad map: %v", m)
+	}
+	// Scoped per network: sepolia's USDC must not appear under Moderato.
+	for _, a := range m["eip155:42431"] {
+		for _, b := range m["eip155:84532"] {
+			if a == b {
+				t.Fatalf("asset %s shared across networks", a)
+			}
+		}
+	}
+	// Explicit 0x asset applies to every network.
+	m2, ok := walletNetworkAssets(nets, "0xABCDEF0000000000000000000000000000000001")
+	if !ok || m2["eip155:84532"][0] != "0xabcdef0000000000000000000000000000000001" ||
+		m2["eip155:42431"][0] != "0xabcdef0000000000000000000000000000000001" {
+		t.Fatalf("explicit asset not applied: %v", m2)
+	}
+	// Solana default mint is not case-folded.
+	m3, ok := walletNetworkAssets([]string{"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"}, "")
+	if !ok || m3["solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"][0] != "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" {
+		t.Fatalf("solana mint case-folded or missing: %v", m3)
+	}
+}

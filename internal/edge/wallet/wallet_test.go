@@ -467,3 +467,51 @@ func TestFetchConnClosedAfterSignature(t *testing.T) {
 		t.Fatalf("status %d", res.Status)
 	}
 }
+
+func TestMatchCINonHexIsExact(t *testing.T) {
+	// EVM hex folds case.
+	if !matchCI([]string{"0xABCD"}, "0xabcd") {
+		t.Fatal("0x address should match case-insensitively")
+	}
+	// Base58 Solana addresses are case-sensitive — folded match is a bug.
+	if matchCI([]string{"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"},
+		"4zmmc9srt5ri5x14gagxhahii3gnpaeerypjgzjdncdu") {
+		t.Fatal("base58 address matched after case folding")
+	}
+	if !matchCI([]string{"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"},
+		"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU") {
+		t.Fatal("base58 exact match failed")
+	}
+}
+
+// A network-scoped asset map must deny an asset that defaults on a
+// different chain — merged Assets lists can't express that.
+func TestFetchNetworkAssetsScopesPerChain(t *testing.T) {
+	otherChainUSDC := "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" // Base mainnet
+	srv := v2Server(t, "1000", func(r *x402.PaymentRequirements) {
+		r.Asset = otherChainUSDC
+	})
+	defer srv.Close()
+	s := &countingSigner{inner: testSigner(t)}
+	_, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL}, Policy{
+		AllowPrivate: true, Networks: []string{testNet},
+		Assets:        []string{testAsset, strings.ToLower(otherChainUSDC)}, // merged list would allow it
+		NetworkAssets: map[string][]string{testNet: {testAsset}},
+	})
+	if !errors.Is(err, ErrPolicy) {
+		t.Fatalf("want ErrPolicy, got %v", err)
+	}
+	if s.calls != 0 {
+		t.Fatalf("signer called %d times", s.calls)
+	}
+	// Same offer with the correct asset pays.
+	srv2 := v2Server(t, "1000")
+	defer srv2.Close()
+	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv2.URL}, Policy{
+		AllowPrivate: true, Networks: []string{testNet},
+		NetworkAssets: map[string][]string{testNet: {testAsset}},
+	})
+	if err != nil || res.Payment == nil {
+		t.Fatalf("expected payment, got %v %+v", err, res)
+	}
+}

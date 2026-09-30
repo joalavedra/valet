@@ -1145,6 +1145,15 @@ func walletChainIDs(nets []string) []int64 {
 	return out
 }
 
+// foldAsset lowercases only 0x-prefixed hex addresses — base58 Solana
+// addresses are case-sensitive.
+func foldAsset(a string) string {
+	if strings.HasPrefix(a, "0x") {
+		return strings.ToLower(a)
+	}
+	return a
+}
+
 // walletChainAssets resolves the credential's asset metadata into a
 // per-chain currency allowlist for the MPP edge. An explicit 0x asset
 // applies to every chain; empty/USDC resolves to that chain's Tempo
@@ -1158,12 +1167,48 @@ func walletChainAssets(nets []string, asset string) map[int64][]string {
 		default:
 			var list []string
 			for _, a := range tempo.DefaultCurrenciesForChain(id) {
-				list = append(list, strings.ToLower(a))
+				list = append(list, foldAsset(a))
 			}
 			out[id] = list
 		}
 	}
 	return out
+}
+
+// walletNetworkAssets resolves the credential's asset metadata into a
+// per-network asset allowlist for the x402 edge — same resolution as
+// walletAllowedAssets but kept per CAIP-2 network instead of merged, so
+// an asset defaulting on one chain can't be spent on another.
+func walletNetworkAssets(nets []string, asset string) (map[string][]string, bool) {
+	if strings.HasPrefix(asset, "0x") {
+		out := map[string][]string{}
+		for _, n := range nets {
+			out[n] = []string{strings.ToLower(asset)}
+		}
+		return out, true
+	}
+	if asset != "" && !strings.EqualFold(asset, "usdc") {
+		return nil, false
+	}
+	out := map[string][]string{}
+	for _, n := range nets {
+		var list []string
+		if id, err := strconv.ParseInt(strings.TrimPrefix(n, "eip155:"), 10, 64); err == nil && tempo.IsKnownChainID(id) {
+			list = tempo.DefaultCurrenciesForChain(id)
+		} else if cfg, ok := evm.NetworkConfigs[n]; ok {
+			list = []string{cfg.DefaultAsset.Address}
+		} else if cfg, ok := svm.NetworkConfigs[n]; ok {
+			list = []string{cfg.DefaultAsset.Address}
+		} else {
+			return nil, false
+		}
+		folded := make([]string, len(list))
+		for i, a := range list {
+			folded[i] = foldAsset(a)
+		}
+		out[n] = folded
+	}
+	return out, true
 }
 
 // walletAllowedAssets resolves the credential's asset metadata into the
@@ -1192,7 +1237,7 @@ func walletAllowedAssets(nets []string, asset string) ([]string, bool) {
 			return nil, false
 		}
 		for _, a := range list {
-			if la := strings.ToLower(a); !seen[la] {
+			if la := foldAsset(a); !seen[la] {
 				seen[la] = true
 				out = append(out, la)
 			}
@@ -1219,13 +1264,19 @@ func (s *Server) walletX402(w http.ResponseWriter, r *http.Request, a *store.Age
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
 		return
 	}
+	netAssets, ok := walletNetworkAssets(nets, c.meta.Asset)
+	if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "wallet metadata incomplete"})
+		return
+	}
 	res, err := walletFetch(r.Context(), c.signers, wallet.Request{
 		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
 	}, wallet.Policy{
-		MaxAmount:    c.capAmt,
-		Networks:     nets,
-		Assets:       assets,
-		AllowPrivate: s.allowPrivate,
+		MaxAmount:     c.capAmt,
+		Networks:      nets,
+		Assets:        assets,
+		NetworkAssets: netAssets,
+		AllowPrivate:  s.allowPrivate,
 	})
 	if err != nil {
 		if errors.Is(err, wallet.ErrPolicy) {
