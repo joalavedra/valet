@@ -61,6 +61,9 @@ type Policy struct {
 	PayTo          []string // allowed recipient addresses (lowercase); empty = any
 	MaxAmount      *big.Int // per call, base units; nil = no cap
 	AllowSponsored bool     // permit fee-payer (sponsored) challenges
+	// ChainAssets, when non-nil, constrains allowed currencies per chain
+	// (denies a chain absent from the map outright). Falls back to Assets.
+	ChainAssets map[int64][]string
 }
 
 // paidInfo records what a credential paid for, for the receipt.
@@ -129,7 +132,15 @@ func (m *Method) checkPolicy(challenge *mpp.Challenge) error {
 	if !chainAllowed(m.pol.ChainIDs, chainID) {
 		return fmt.Errorf("chain %d not allowed", chainID)
 	}
-	if len(m.pol.Assets) > 0 && !matchFold(m.pol.Assets, request.Currency) {
+	if m.pol.ChainAssets != nil {
+		assets, ok := m.pol.ChainAssets[chainID]
+		if !ok {
+			return fmt.Errorf("chain %d has no allowed assets", chainID)
+		}
+		if !matchFold(assets, request.Currency) {
+			return fmt.Errorf("currency %s not allowed on chain %d", request.Currency, chainID)
+		}
+	} else if len(m.pol.Assets) > 0 && !matchFold(m.pol.Assets, request.Currency) {
 		return fmt.Errorf("currency %s not allowed", request.Currency)
 	}
 	if len(m.pol.PayTo) > 0 && !matchFold(m.pol.PayTo, request.Recipient) {
@@ -180,8 +191,9 @@ func (m *Method) CreateCredential(ctx context.Context, challenge *mpp.Challenge)
 	}
 
 	addr := m.signer.Address()
-	if request.Amount == "0" {
-		signature, err := m.signProof(chainID, challenge.ID, challenge.Realm)
+	amount, _ := new(big.Int).SetString(request.Amount, 10) // checked in checkPolicy
+	if amount != nil && amount.Sign() == 0 {
+		signature, err := m.signProof(ctx, chainID, challenge.ID, challenge.Realm)
 		if err != nil {
 			return nil, err
 		}
@@ -230,14 +242,14 @@ func (m *Method) paid() *paidInfo {
 	return m.last
 }
 
-func (m *Method) signProof(chainID int64, challengeID, realm string) (string, error) {
+func (m *Method) signProof(ctx context.Context, chainID int64, challengeID, realm string) (string, error) {
 	hash, err := tempo.ProofTypedDataHash(chainID, m.signer.Address(), challengeID, realm)
 	if err != nil {
 		return "", fmt.Errorf("tempo client: build proof payload: %w", err)
 	}
 	var h [32]byte
 	copy(h[:], hash.Bytes())
-	sig, err := m.signer.SignHash(context.Background(), h)
+	sig, err := m.signer.SignHash(ctx, h)
 	if err != nil {
 		return "", fmt.Errorf("tempo client: sign proof payload: %w", err)
 	}
@@ -526,6 +538,12 @@ func Fetch(ctx context.Context, signer HashSigner, req wallet.Request, pol Polic
 	if err != nil {
 		if errors.Is(err, wallet.ErrPolicy) {
 			return nil, fmt.Errorf("%w: %s", wallet.ErrPolicy, wallet.ScrubErr(err))
+		}
+		// The credential was already sent and the conn died — the upstream
+		// may still settle; conservatively count it as paid.
+		if paid := method.paid(); paid != nil {
+			return &wallet.Response{Status: 0, PaymentAttempted: true,
+				Payment: paymentFrom(paid, "")}, nil
 		}
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}

@@ -1124,13 +1124,39 @@ func walletNetworks(raw string) []string {
 	return out
 }
 
-// walletChainIDs parses the eip155 chain ids out of the network list.
+// walletChainIDs parses the eip155 chain ids out of the network list;
+// only `eip155:<positive int>` entries count — bare numbers or garbage
+// are ignored.
 func walletChainIDs(nets []string) []int64 {
 	var out []int64
 	for _, n := range nets {
+		if !strings.HasPrefix(n, "eip155:") {
+			continue
+		}
 		id, err := strconv.ParseInt(strings.TrimPrefix(n, "eip155:"), 10, 64)
-		if err == nil {
+		if err == nil && id > 0 {
 			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// walletChainAssets resolves the credential's asset metadata into a
+// per-chain currency allowlist for the MPP edge. An explicit 0x asset
+// applies to every chain; empty/USDC resolves to that chain's Tempo
+// defaults.
+func walletChainAssets(nets []string, asset string) map[int64][]string {
+	out := map[int64][]string{}
+	for _, id := range walletChainIDs(nets) {
+		switch {
+		case strings.HasPrefix(asset, "0x"):
+			out[id] = []string{strings.ToLower(asset)}
+		default:
+			var list []string
+			for _, a := range tempo.DefaultCurrenciesForChain(id) {
+				list = append(list, strings.ToLower(a))
+			}
+			out[id] = list
 		}
 	}
 	return out
@@ -1233,9 +1259,10 @@ func (s *Server) walletMPP(w http.ResponseWriter, r *http.Request, a *store.Agen
 	res, err := mppFetch(r.Context(), signer, wallet.Request{
 		Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body,
 	}, mppedg.Policy{
-		ChainIDs:  walletChainIDs(nets),
-		Assets:    assets,
-		MaxAmount: c.capAmt,
+		ChainIDs:    walletChainIDs(nets),
+		Assets:      assets,
+		ChainAssets: walletChainAssets(nets, c.meta.Asset),
+		MaxAmount:   c.capAmt,
 	}, nil)
 	if err != nil {
 		if errors.Is(err, wallet.ErrPolicy) {

@@ -459,3 +459,81 @@ func TestFetchLostBodyCountsPaid(t *testing.T) {
 		t.Fatalf("%+v", res.Payment)
 	}
 }
+
+// A server that hijacks and closes the connection once the credential
+// arrives simulates a lost response after the payment was sent.
+func TestFetchConnClosedAfterCredential(t *testing.T) {
+	s := newTestSigner(t)
+	ch := testChallenge(t, chargeMap("0.01", currency, payee.Hex(), testChain))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.Header.Get("Authorization"), "Payment ") {
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				conn.Close()
+				return
+			}
+			t.Error("no hijacker")
+		}
+		w.Header().Set("WWW-Authenticate", ch.ToAuthenticate(testRealm))
+		w.WriteHeader(402)
+	}))
+	defer srv.Close()
+	res, err := Fetch(context.Background(), s, wallet.Request{Method: "GET", URL: srv.URL},
+		defaultPolicy(), &fakeRPC{chainID: uint64(testChain), nonce: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.PaymentAttempted || res.Payment == nil {
+		t.Fatalf("expected conservative paid result: %+v", res)
+	}
+	if res.Payment.Amount != "10000" || res.Payment.Network != "eip155:42431" {
+		t.Fatalf("payment %+v", res.Payment)
+	}
+	if res.Status != 0 {
+		t.Fatalf("status %d", res.Status)
+	}
+}
+
+// "00" must take the zero-amount proof path like "0".
+func TestZeroAmountPadded(t *testing.T) {
+	s := newTestSigner(t)
+	m := NewMethod(s, defaultPolicy(), &fakeRPC{chainID: uint64(testChain)})
+	ch := testChallenge(t, chargeMap("00", currency, payee.Hex(), testChain))
+	cred, err := m.CreateCredential(context.Background(), ch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.Payload["type"] != "proof" {
+		t.Fatalf("payload %+v", cred.Payload)
+	}
+	if s.callCount() != 1 {
+		t.Fatalf("signer calls %d", s.callCount())
+	}
+}
+
+// ChainAssets must scope currencies to their own chain: a token that is
+// another Tempo chain's default must not be payable here.
+func TestChainAssetsScopesPerChain(t *testing.T) {
+	s := newTestSigner(t)
+	pol := defaultPolicy()
+	pol.ChainAssets = map[int64][]string{testChain: {strings.ToLower(currency)}}
+	m := NewMethod(s, pol, &fakeRPC{chainID: uint64(testChain)})
+	// Chain B's default (mainnet USDC.e) requested on chain A.
+	other := "0x20C000000000000000000000b9537d11c60E8b50"
+	ch := testChallenge(t, chargeMap("0.01", other, payee.Hex(), testChain))
+	if _, err := m.CreateCredential(context.Background(), ch); err == nil {
+		t.Fatal("expected cross-chain asset denial")
+	} else if !errors.Is(err, wallet.ErrPolicy) {
+		t.Fatalf("want ErrPolicy, got %v", err)
+	}
+	if s.callCount() != 0 {
+		t.Fatal("signer called on denied challenge")
+	}
+	// Chain absent from the map is denied outright.
+	pol.ChainAssets = map[int64][]string{4217: {strings.ToLower(currency)}}
+	m2 := NewMethod(s, pol, &fakeRPC{chainID: uint64(testChain)})
+	ch2 := testChallenge(t, chargeMap("0.01", currency, payee.Hex(), testChain))
+	if _, err := m2.CreateCredential(context.Background(), ch2); !errors.Is(err, wallet.ErrPolicy) {
+		t.Fatalf("want ErrPolicy for unlisted chain, got %v", err)
+	}
+}

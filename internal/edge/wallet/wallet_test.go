@@ -413,3 +413,45 @@ func TestFetchStripsPaymentHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A server that hijacks and closes the connection once the payment
+// signature arrives simulates a lost response after paying.
+func TestFetchConnClosedAfterSignature(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("PAYMENT-SIGNATURE") != "" {
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				conn.Close()
+				return
+			}
+			t.Error("no hijacker")
+		}
+		req := x402.PaymentRequirements{
+			Scheme: "exact", Network: testNet, Asset: testAsset,
+			Amount: "1000", PayTo: testPayTo, MaxTimeoutSeconds: 300,
+			Extra: map[string]interface{}{"name": "USD Coin", "version": "2"},
+		}
+		pr, _ := json.Marshal(x402.PaymentRequired{
+			X402Version: 2, Accepts: []x402.PaymentRequirements{req},
+			Resource: &x402.ResourceInfo{URL: "http://" + r.Host + r.URL.Path},
+		})
+		w.Header().Set("PAYMENT-REQUIRED", base64.StdEncoding.EncodeToString(pr))
+		w.WriteHeader(402)
+	}))
+	defer srv.Close()
+	s := testSigner(t)
+	res, err := Fetch(context.Background(), Signers{EVM: s}, Request{Method: "GET", URL: srv.URL},
+		Policy{Networks: []string{testNet}, MaxAmount: big.NewInt(2000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.PaymentAttempted || res.Payment == nil {
+		t.Fatalf("expected conservative paid result: %+v", res)
+	}
+	if res.Payment.Network != testNet || res.Payment.Amount != "1000" {
+		t.Fatalf("payment %+v", res.Payment)
+	}
+	if res.Status != 0 {
+		t.Fatalf("status %d", res.Status)
+	}
+}
