@@ -64,9 +64,12 @@ func (a *app) resolveCard(ctx context.Context) (string, []cardInfo, error) {
 			def = cards[0].Label
 		}
 		a.mu.Lock()
+		changed := a.defaultCard != def
 		a.defaultCard = def
 		a.mu.Unlock()
-		a.saveState()
+		if changed {
+			a.saveState()
+		}
 	}
 	return def, cards, nil
 }
