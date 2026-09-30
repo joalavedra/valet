@@ -102,7 +102,12 @@ function bubble(cls, text) {
   $('messages').appendChild(d); $('messages').scrollTop = $('messages').scrollHeight;
 }
 function receipt(o) {
-  bubble('receipt', `<div class="amt">${money(o.total_cents)}</div><div>${esc(o.order_id)} · card ****${esc(o.last4)}</div><div class="muted">Paid via Valet</div>`);
+  let line = `<div>${esc(o.order_id)} · card ****${esc(o.last4 || '')}</div>`;
+  if (o.tx) {
+    const short = o.tx.slice(0, 10) + '…';
+    line = `<div>${esc(o.order_id)} · ${esc(o.rail || '')} ${o.explorer_url ? `<a href="${esc(o.explorer_url)}" style="color:#7dd3fc">${esc(short)}</a>` : esc(short)} · ${esc(o.network || '')}</div>`;
+  }
+  bubble('receipt', `<div class="amt">${money(o.total_cents)}</div>${line}<div class="muted">Paid via Valet</div>`);
 }
 
 function ask(text) { $('msg').value = text; send(); }
@@ -157,7 +162,7 @@ function showApproval(d) {
   if (currentApprovalId === d.request_id && $('sheet').classList.contains('open')) return;
   currentApprovalId = d.request_id;
   sheetReq = d.request_id;
-  $('sh-amt').textContent = money(d.amount_cents || 0);
+  $('sh-amt').textContent = d.rail ? (d.rail === 'mpp' ? '0.01 pathUSD via mpp' : '0.01 USDC via x402') : money(d.amount_cents || 0);
   $('sh-merchant').textContent = d.merchant || '';
   $('sh-purpose').textContent = d.purpose || '';
   $('sh-exp').textContent = d.expires_at ? new Date(d.expires_at).toLocaleTimeString() : '';
@@ -171,10 +176,12 @@ async function pollPending() {
     const p = (s.pending_approvals || [])[0];
     if (p && p.id) {
       const spend = (p.policy && p.policy.spend) || {};
+      const wallet = p.type === 'wallet' || (p.handle || '').startsWith('wallet://');
+      const rail = wallet ? (/via mpp/.test(p.purpose || '') ? 'mpp' : 'x402') : undefined;
       showApproval({
-        request_id: p.id, purpose: p.purpose || '',
+        request_id: p.id, purpose: p.purpose || '', rail,
         amount_cents: spend.per_tx || 0,
-        merchant: (spend.merchants || [''])[0],
+        merchant: (wallet ? ((p.policy && p.policy.hosts) || ['']) : (spend.merchants || ['']))[0],
         expires_at: p.expires_at || '',
         agent: 'Valet Shopping Agent'
       });
@@ -218,7 +225,10 @@ async function loadWallet() {
   h += '</div><div class="card"><div class="t">Recent activity</div>';
   h += (s.audit && s.audit.length) ? s.audit.map(e => `<div class="grant"><span class="mono">${esc(e.Edge)} ${esc(e.Decision)}</span><span class="muted">${esc(e.Handle || e.Target || '')}</span></div>`).join('') : '<div class="muted">None</div>';
   h += '</div><div class="card"><div class="t">Orders</div>';
-  h += (s.orders && s.orders.length) ? s.orders.map(o => `<div class="grant"><span>${money(o.total_cents)} ****${esc(o.last4)}</span><span class="muted">${esc(o.order_id)}</span></div>`).join('') : '<div class="muted">None</div>';
+  h += (s.orders && s.orders.length) ? s.orders.map(o => {
+    const what = o.tx ? `${esc(o.rail)} <a href="${esc(o.explorer_url || '#')}" style="color:#7dd3fc">${esc(o.tx.slice(0,10))}…</a>` : `****${esc(o.last4)}`;
+    return `<div class="grant"><span>${money(o.total_cents)} ${what}</span><span class="muted">${esc(o.order_id)}</span></div>`;
+  }).join('') : '<div class="muted">None</div>';
   b.innerHTML = h + '</div>';
   const btn = $('addcard');
   if (btn) btn.onclick = async () => {

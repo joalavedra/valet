@@ -100,6 +100,15 @@ func (v *valetClient) pay(ctx context.Context, grantToken, url, body string, amo
 	return out, err
 }
 
+// walletFetch runs a crypto-rail fetch through Valet's wallet edge:
+// rail "x402" → /v1/edge/wallet/x402, "mpp" → /v1/edge/wallet/mpp.
+func (v *valetClient) walletFetch(ctx context.Context, grantToken, rail, method, url string) (map[string]any, error) {
+	var out map[string]any
+	err := v.call(ctx, v.agentToken, "POST", "/v1/edge/wallet/"+rail,
+		map[string]any{"grant_token": grantToken, "method": method, "url": url}, &out)
+	return out, err
+}
+
 // ---- owner calls ----
 
 func (v *valetClient) ownerCreateCapture(ctx context.Context, label string, ttl int64, returnURL string) (map[string]any, error) {
