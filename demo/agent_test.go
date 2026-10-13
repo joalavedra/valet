@@ -39,6 +39,9 @@ func TestAgentCheckoutDedupesPendingApproval(t *testing.T) {
 	var events []map[string]any
 	var mu sync.Mutex
 	emit := func(ev string, d any) {
+		if ev == "step" { // progress lines are not under test here
+			return
+		}
 		mu.Lock()
 		events = append(events, map[string]any{"ev": ev, "d": d})
 		mu.Unlock()

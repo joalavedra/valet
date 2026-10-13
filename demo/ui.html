@@ -82,6 +82,11 @@
   .merchant { display: flex; align-items: center; gap: 10px; }
   .merchant b { display: block; font-size: 14px; font-weight: 600; }
   .merchant small { color: var(--muted-fg); font-size: 12px; }
+  .checkout .steps { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .checkout .steps:empty { display: none; }
+  .checkout .step { font-size: 13.5px; color: var(--fg); padding: 0; }
+  .checkout .step[data-status="ok"] .ic { color: var(--primary); }
+  .checkout .step[data-status="fail"] .ic { color: var(--danger); }
   .total { display: flex; justify-content: space-between; font-weight: 600; font-size: 14.5px; }
 
   /* Product shelf */
@@ -338,7 +343,7 @@ function setActivity(el, text, status) {
   if (text) el.querySelector('.t').textContent = text;
 }
 function settleActivities() {
-  thread.querySelectorAll('.activity[data-status="run"]').forEach(el => setActivity(el, el.dataset.doneText, 'ok'));
+  thread.querySelectorAll('.activity:not(.step)[data-status="run"]').forEach(el => setActivity(el, el.dataset.doneText, 'ok'));
 }
 
 function typing(on) {
@@ -349,17 +354,63 @@ function typing(on) {
 
 const TOOL_TEXT = {
   list_products: () => ['Looking through the store…', 'Looked through the store'],
-  checkout: p => [`Going to checkout${p ? ' · ' + p.name : ''}`, 'Went to payment'],
-  buy_with_wallet: p => [`Paying from your wallet${p ? ' · ' + p.name : ''}`, 'Went to payment'],
 };
+const BUY_TOOLS = { checkout: 'Buying', buy_with_wallet: 'Buying' };
 function onTool(d) {
   settleActivities();
   const p = productFromArgs(d.args);
   if (p) lastProduct = p;
+  if (BUY_TOOLS[d.name]) { checkoutPanel(BUY_TOOLS[d.name]); return; }
   const [run, done] = (TOOL_TEXT[d.name] || (() => [d.name.replace(/_/g, ' ') + '…', d.name.replace(/_/g, ' ')]))(p);
   const el = activity(run, 'run');
   el.dataset.doneText = done;
   if (d.name === 'list_products') shelf();
+}
+
+/* A live checkout: one row per stage the server streams (budget, pay,
+   order), with an elapsed timer. A stage that arrives once other things
+   have landed below the card continues in a fresh card at the bottom. */
+let checkout = null;
+function checkoutPanel(verb) {
+  stopCheckout();
+  const p = lastProduct;
+  const el = node('panel checkout', `
+    <div class="merchant"><span class="tile">${esc(p ? p.emoji : '🛍️')}</span>
+      <div style="flex:1;min-width:0">${verb === 'Continuing'
+        ? `<b>Continuing checkout</b><small>${esc(p ? p.name + ' · ' : '')}${esc(location.hostname)}</small>`
+        : `<b>${esc(verb)} ${esc(p ? p.name : 'your order')}</b><small>${esc(location.hostname)}</small>`}</div>
+      <small class="tnum" data-clock style="color:var(--muted-fg);align-self:flex-start">0s</small></div>
+    <div class="steps"></div>`);
+  checkout = { el, t0: Date.now(), rows: {} };
+  checkout.timer = setInterval(() => { if (checkout) tickCheckout(); }, 1000);
+  return add(el);
+}
+function tickCheckout() {
+  checkout.el.querySelector('[data-clock]').textContent = Math.round((Date.now() - checkout.t0) / 1000) + 's';
+}
+function stopCheckout() {
+  if (!checkout) return;
+  clearInterval(checkout.timer);
+  tickCheckout();
+  checkout.el.querySelectorAll('.step[data-status="run"]').forEach(r => setActivity(r, '', 'ok'));
+  checkout = null;
+}
+function onStep(d) {
+  if (!checkout) checkoutPanel('Buying');
+  let row = checkout.rows[d.id];
+  if (!row) {
+    const last = [...thread.children].filter(c => !c.classList.contains('typing')).pop();
+    if (last !== checkout.el) {
+      const keep = checkout.rows; stopCheckout(); checkoutPanel('Continuing');
+      checkout.rows = Object.assign({}, keep);
+    }
+    row = node('activity step', '<span class="ic"></span><span class="t"></span>');
+    checkout.el.querySelector('.steps').appendChild(row);
+    checkout.rows[d.id] = row;
+    stick();
+  }
+  setActivity(row, d.label, d.status);
+  if (d.status === 'fail' || d.id === 'order') stopCheckout();
 }
 
 function shelf() {
@@ -398,18 +449,11 @@ function finishApprovalPanel(id, approved) {
   const b = el.querySelector('[data-badge]');
   b.textContent = approved ? 'Approved' : 'Denied';
   b.className = 'badge ' + (approved ? 'ok' : 'no');
-  if (!approved) {
-    const pay = [...thread.querySelectorAll('.activity')].filter(a => a.dataset.doneText === 'Went to payment').pop();
-    if (pay) { pay.dataset.doneText = 'Checkout stopped'; setActivity(pay, 'Checkout stopped', 'fail'); }
-  }
-  const card = defaultCard();
-  activity(approved ? `Budget approved${card ? ' · ' + brandOf(card) + ' •••• ' + (card.last4 || '') : ''}` : 'You denied the request', approved ? 'ok' : 'fail');
 }
 
 function receipt(o) {
   settleActivities();
-  const pay = [...thread.querySelectorAll('.activity')].filter(el => el.dataset.doneText === 'Went to payment').pop();
-  if (pay) setActivity(pay, 'Order placed', 'ok');
+  stopCheckout();
   const p = lastProduct;
   const qty = 1;
   let paidWith;
@@ -456,6 +500,7 @@ async function send() {
         const d = JSON.parse(dt[1]);
         if (ev[1] === 'text') say('agent', d.content);
         if (ev[1] === 'tool') onTool(d);
+        if (ev[1] === 'step') onStep(d);
         if (ev[1] === 'approval_required') showApproval(d);
         if (ev[1] === 'receipt') receipt(d);
         if (ev[1] === 'error') activity('Something went wrong: ' + d.error, 'fail');
@@ -468,6 +513,7 @@ async function send() {
     clearInterval(pollTimer);
     typing(false);
     settleActivities();
+    if (gotDone) stopCheckout();
     busy = false; $('send').disabled = !$('msg').value.trim();
     // The stream ended without a done event (Safari may drop fetch streams):
     // keep polling pending approvals for up to 60s as a fallback.

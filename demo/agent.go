@@ -184,6 +184,7 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 		}
 		st, err := a.valet.grantRequestStatus(ctx, pa.id, 0)
 		if err == nil && st["status"] == "pending" {
+			step(emit, "budget", "Waiting for your approval", "run")
 			emit("approval_required", map[string]any{
 				"request_id": pa.id, "purpose": pa.purpose, "amount_cents": pa.total,
 				"merchant": pa.merchant, "expires_at": pa.expiresAt, "agent": "Valet Shopping Agent",
@@ -212,9 +213,11 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 		clearPending()
 		return map[string]any{"status": "error", "reason": "no card saved — add one in the Wallet tab"}
 	}
+	step(emit, "budget", "Asking you for a budget", "run")
 	out, err := a.valet.requestGrant(ctx, "card://"+label, purpose, 600, 1, pol)
 	if err != nil {
 		clearPending()
+		step(emit, "budget", "Could not ask for a budget", "fail")
 		return map[string]any{"status": "error", "reason": "grant request failed"}
 	}
 	var grantToken string
@@ -230,10 +233,12 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 			"request_id": rid, "purpose": purpose, "amount_cents": total,
 			"merchant": merchant, "expires_at": exp, "agent": "Valet Shopping Agent",
 		})
+		step(emit, "budget", "Waiting for your approval", "run")
 		deadline := time.Now().Add(5 * time.Minute)
 		for {
 			if time.Now().After(deadline) {
 				clearPending()
+				step(emit, "budget", "Approval timed out", "fail")
 				return map[string]any{"status": "expired", "reason": "approval timed out"}
 			}
 			st, err := a.valet.grantRequestStatus(ctx, rid, 60)
@@ -253,6 +258,7 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 			default:
 				clearPending()
 				s, _ := st["status"].(string)
+				step(emit, "budget", budgetOutcome(s), "fail")
 				return map[string]any{"status": s}
 			}
 			break
@@ -263,10 +269,13 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 		grantToken, _ = out["token"].(string)
 	}
 	if grantToken == "" {
+		step(emit, "budget", "No budget was issued", "fail")
 		return map[string]any{"status": "error", "reason": "no grant token"}
 	}
+	step(emit, "budget", "Budget approved", "ok")
 	orderJSON, _ := json.Marshal(map[string]any{"items": []orderItem{{ID: productID, Qty: qty}}})
 	body := fmt.Sprintf(`{"order":%s,"card":{"number":"{{card.number}}","exp_month":"{{card.exp_month}}","exp_year":"{{card.exp_year}}","cvc":"{{card.cvc}}"}}`, orderJSON)
+	step(emit, "pay", "Valet is swapping your card in at checkout", "run")
 	res, err := a.valet.pay(ctx, grantToken, a.cfg.PublicURL+"/store/checkout", string(body), total, "USD")
 	if err != nil && strings.Contains(err.Error(), "need_cvc") {
 		// Stored card has no CVC on file — retry without the field.
@@ -274,12 +283,15 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 		res, err = a.valet.pay(ctx, grantToken, a.cfg.PublicURL+"/store/checkout", string(body), total, "USD")
 	}
 	if err != nil {
+		step(emit, "pay", "Payment failed", "fail")
 		return map[string]any{"status": "error", "reason": "pay failed"}
 	}
 	status, _ := res["status"].(string)
 	if status != "ok" {
+		step(emit, "pay", "The store declined the card", "fail")
 		return map[string]any{"status": "declined", "reason": status}
 	}
+	step(emit, "pay", "Card swapped in at the edge", "ok")
 	var upstream struct {
 		OrderID    string `json:"order_id"`
 		Status     string `json:"status"`
@@ -293,8 +305,28 @@ func (a *app) agentCheckout(ctx context.Context, convID, productID string, qty i
 		"order_id": upstream.OrderID, "total_cents": upstream.TotalCents,
 		"last4": upstream.Last4, "status": "paid",
 	}
+	step(emit, "order", "Order placed", "ok")
 	emit("receipt", receipt)
 	return map[string]any{"status": "paid", "order_id": upstream.OrderID, "total_cents": upstream.TotalCents, "last4": upstream.Last4}
+}
+
+// step streams checkout progress to the UI. id names the stage ("budget",
+// "pay", "order") so a later event updates the same line; status is "run",
+// "ok" or "fail".
+func step(emit sseEmit, id, label, status string) {
+	emit("step", map[string]string{"id": id, "label": label, "status": status})
+}
+
+// budgetOutcome words a terminal, non-approved grant request status.
+func budgetOutcome(status string) string {
+	switch status {
+	case "denied":
+		return "You denied the budget"
+	case "expired":
+		return "Approval expired"
+	default:
+		return "Budget not approved"
+	}
 }
 
 // walletExplorerURL maps a settled payment to a block-explorer link.
@@ -364,6 +396,7 @@ func (a *app) agentWalletBuy(ctx context.Context, convID, productID, rail string
 		}
 		st, err := a.valet.grantRequestStatus(ctx, pa.id, 0)
 		if err == nil && st["status"] == "pending" {
+			step(emit, "budget", "Waiting for your approval", "run")
 			emit("approval_required", map[string]any{
 				"request_id": pa.id, "purpose": pa.purpose, "amount_cents": pa.total,
 				"merchant": pa.merchant, "expires_at": pa.expiresAt, "rail": pa.rail,
@@ -384,9 +417,11 @@ func (a *app) agentWalletBuy(ctx context.Context, convID, productID, rail string
 		delete(a.pending, convID)
 		a.mu.Unlock()
 	}
+	step(emit, "budget", "Asking you for a budget", "run")
 	out, err := a.valet.requestGrant(ctx, "wallet://"+a.cfg.WalletLabel, purpose, 600, 1, pol)
 	if err != nil {
 		clearPending()
+		step(emit, "budget", "Could not ask for a budget", "fail")
 		return map[string]any{"status": "error", "reason": "grant request failed"}
 	}
 	var grantToken string
@@ -403,10 +438,12 @@ func (a *app) agentWalletBuy(ctx context.Context, convID, productID, rail string
 			"request_id": rid, "purpose": purpose, "amount_cents": p.PriceCents,
 			"merchant": merchant, "expires_at": exp, "rail": rail, "agent": "Valet Shopping Agent",
 		})
+		step(emit, "budget", "Waiting for your approval", "run")
 		deadline := time.Now().Add(5 * time.Minute)
 		for {
 			if time.Now().After(deadline) {
 				clearPending()
+				step(emit, "budget", "Approval timed out", "fail")
 				return map[string]any{"status": "expired", "reason": "approval timed out"}
 			}
 			st, err := a.valet.grantRequestStatus(ctx, rid, 60)
@@ -424,6 +461,7 @@ func (a *app) agentWalletBuy(ctx context.Context, convID, productID, rail string
 			default:
 				clearPending()
 				s, _ := st["status"].(string)
+				step(emit, "budget", budgetOutcome(s), "fail")
 				return map[string]any{"status": s}
 			}
 			break
@@ -434,14 +472,18 @@ func (a *app) agentWalletBuy(ctx context.Context, convID, productID, rail string
 		grantToken, _ = out["token"].(string)
 	}
 	if grantToken == "" {
+		step(emit, "budget", "No budget was issued", "fail")
 		return map[string]any{"status": "error", "reason": "no grant token"}
 	}
+	step(emit, "budget", "Budget approved", "ok")
 	path := "/store/premium/report"
 	if rail == "mpp" {
 		path += "/mpp"
 	}
+	step(emit, "pay", "Paying from your wallet over "+rail, "run")
 	res, err := a.valet.walletFetch(ctx, grantToken, rail, "GET", a.cfg.PublicURL+path)
 	if err != nil {
+		step(emit, "pay", "Wallet payment failed", "fail")
 		if strings.Contains(err.Error(), "-> 403") {
 			return map[string]any{"status": "declined", "reason": "declined by wallet policy"}
 		}
@@ -449,12 +491,15 @@ func (a *app) agentWalletBuy(ctx context.Context, convID, productID, rail string
 	}
 	pay, _ := res["payment"].(map[string]any)
 	if res["status"] != "paid" || pay == nil {
+		step(emit, "pay", "The store did not accept the payment", "fail")
 		return map[string]any{"status": "declined", "reason": "payment not accepted"}
 	}
 	network, _ := pay["network"].(string)
 	tx, _ := pay["transaction"].(string)
+	step(emit, "pay", "Paid on-chain", "ok")
 	httpStatus, _ := res["http_status"].(float64)
 	if httpStatus < 200 || httpStatus >= 300 {
+		step(emit, "order", "Report delivery failed", "fail")
 		return map[string]any{
 			"status": "error", "reason": fmt.Sprintf("payment settled but report delivery failed (HTTP %d)", int(httpStatus)),
 			"tx": tx, "network": network, "explorer_url": walletExplorerURL(network, tx),
@@ -483,6 +528,7 @@ func (a *app) agentWalletBuy(ctx context.Context, convID, productID, rail string
 		"rail": rail, "network": network, "tx": tx, "explorer_url": o.ExplorerURL,
 		"title": report.Title, "summary": report.Summary,
 	}
+	step(emit, "order", "Report delivered", "ok")
 	emit("receipt", receipt)
 	return receipt
 }
