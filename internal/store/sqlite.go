@@ -426,6 +426,54 @@ func (s *SQLite) ListAuditRecent(limit int) ([]AuditEntry, error) {
 	return out, rows.Err()
 }
 
+func (s *SQLite) AddPasskey(p *Passkey) error {
+	_, err := s.db.Exec(`INSERT INTO passkeys (id, name, credential_json) VALUES (?,?,?)`, p.ID, p.Name, p.Credential)
+	return err
+}
+
+func (s *SQLite) ListPasskeys() ([]Passkey, error) {
+	rows, err := s.db.Query(`SELECT id, name, credential_json, created_at, last_used_at FROM passkeys ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Passkey
+	for rows.Next() {
+		var p Passkey
+		var used sql.NullTime
+		if err := rows.Scan(&p.ID, &p.Name, &p.Credential, &p.CreatedAt, &used); err != nil {
+			return nil, err
+		}
+		if used.Valid {
+			p.LastUsedAt = &used.Time
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) TouchPasskey(id, credential string) error {
+	res, err := s.db.Exec(`UPDATE passkeys SET credential_json = ?, last_used_at = ? WHERE id = ?`, credential, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLite) DeletePasskey(id string) error {
+	res, err := s.db.Exec(`DELETE FROM passkeys WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *SQLite) Meta(key string) (string, error) {
 	var v string
 	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)

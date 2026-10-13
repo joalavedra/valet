@@ -109,6 +109,10 @@ func main() {
 	mux.HandleFunc("POST /api/approvals/{id}/approve", a.decisionHandler("approve"))
 	mux.HandleFunc("POST /api/approvals/{id}/deny", a.decisionHandler("deny"))
 	mux.HandleFunc("POST /api/grants/{id}/revoke", a.revokeHandler)
+	mux.HandleFunc("POST /api/passkeys/challenge", a.passkeyChallengeHandler)
+	mux.HandleFunc("POST /api/passkeys/register/begin", a.passkeyRelay("POST", "/v1/owner/passkeys/register/begin"))
+	mux.HandleFunc("POST /api/passkeys/register/finish", a.passkeyRelay("POST", "/v1/owner/passkeys/register/finish"))
+	mux.HandleFunc("DELETE /api/passkeys/{id}", a.passkeyRelay("DELETE", "/v1/owner/passkeys"))
 	mux.HandleFunc("GET /manifest.webmanifest", a.manifestHandler)
 	mux.HandleFunc("GET /{$}", a.indexHandler)
 	// Unauthenticated reverse proxy for the Valet pages the phone needs:

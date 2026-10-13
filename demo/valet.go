@@ -134,6 +134,33 @@ func (v *valetClient) ownerAction(ctx context.Context, path string) (map[string]
 	return v.ownerActionBody(ctx, path, nil)
 }
 
+// ownerRaw makes an owner call and hands back Valet's status and body
+// unchanged, for endpoints whose errors the browser has to see (a 403
+// passkey_required tells the UI to run the passkey ceremony).
+func (v *valetClient) ownerRaw(ctx context.Context, method, path string, body any) (int, []byte, error) {
+	var rdr io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return 0, nil, err
+		}
+		rdr = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, v.base+path, rdr)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+v.ownerToken)
+	resp, err := v.http.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, data, err
+}
+
 func (v *valetClient) ownerActionBody(ctx context.Context, path string, body any) (map[string]any, error) {
 	var out map[string]any
 	err := v.call(ctx, v.ownerToken, "POST", path, body, &out)

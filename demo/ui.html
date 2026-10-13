@@ -285,12 +285,58 @@ const approvalPanels = {};    // request id → in-thread panel
 const approvals = {};         // request id → last approval_required payload
 let lastProduct = null;       // the product the agent is buying, for the receipt
 
+/* ---------- Passkeys (WebAuthn) ----------
+   Valet hands out options as JSON with base64url buffers; the browser API
+   wants ArrayBuffers in and gives ArrayBuffers back. */
+const b64u = {
+  dec: s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0)).buffer,
+  enc: b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+};
+const withIds = list => (list || []).map(c => Object.assign({}, c, { id: b64u.dec(c.id) }));
+function passkeysRequired() { return !!(state.passkeys && state.passkeys.required); }
+function passkeyError(e) {
+  if (e && e.name === 'NotAllowedError') return 'Passkey cancelled';
+  return (e && e.message) || 'Passkey failed';
+}
+async function passkeyAssert(pk) {
+  const c = await navigator.credentials.get({ publicKey: Object.assign({}, pk, { challenge: b64u.dec(pk.challenge), allowCredentials: withIds(pk.allowCredentials) }) });
+  return { id: c.id, rawId: b64u.enc(c.rawId), type: c.type, response: {
+    clientDataJSON: b64u.enc(c.response.clientDataJSON), authenticatorData: b64u.enc(c.response.authenticatorData),
+    signature: b64u.enc(c.response.signature), userHandle: c.response.userHandle ? b64u.enc(c.response.userHandle) : null } };
+}
+async function passkeyCreate(pk) {
+  const c = await navigator.credentials.create({ publicKey: Object.assign({}, pk, {
+    challenge: b64u.dec(pk.challenge), user: Object.assign({}, pk.user, { id: b64u.dec(pk.user.id) }), excludeCredentials: withIds(pk.excludeCredentials) }) });
+  return { id: c.id, rawId: b64u.enc(c.rawId), type: c.type, response: {
+    clientDataJSON: b64u.enc(c.response.clientDataJSON), attestationObject: b64u.enc(c.response.attestationObject),
+    transports: c.response.getTransports ? c.response.getTransports() : [] } };
+}
+async function postJSON(url, body, method) {
+  const r = await fetch(url, { method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(j.error || 'HTTP ' + r.status); e.status = r.status; e.code = j.error; throw e; }
+  return j;
+}
+// stepUp proves presence for one action: {action, approval_id?, card?, passkey_id?}.
+async function stepUp(req) {
+  const ch = await postJSON('/api/passkeys/challenge', req);
+  return { session_id: ch.session_id, assertion: await passkeyAssert(ch.options.publicKey) };
+}
+async function enrollPasskey() {
+  const proof = passkeysRequired() ? await stepUp({ action: 'register' }) : undefined;
+  const begin = await postJSON('/api/passkeys/register/begin', proof ? { passkey: proof } : {});
+  const credential = await passkeyCreate(begin.options.publicKey);
+  const name = /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone' : /Android/.test(navigator.userAgent) ? 'Android phone' : /Mac/.test(navigator.userAgent) ? 'Mac' : 'This device';
+  return postJSON('/api/passkeys/register/finish', { session_id: begin.session_id, name, credential });
+}
+
 const ICON = {
   check: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="m8 12.5 2.7 2.7L16 9.8"/></svg>',
   x: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9.5"/><path d="m9 9 6 6M15 9l-6 6"/></svg>',
   lock: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   plus: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   bigcheck: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
+  key: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M17 6l3 3M14.5 8.5l2 2"/></svg>',
   bigx: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#525252" stroke-width="2.6" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
 };
 
@@ -585,8 +631,8 @@ function showApproval(d, reopen) {
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 15 5 5 5-5M7 9l5-5 5 5"/></svg>
         <select id="ap-card">${cards.map(c => `<option value="${esc(c.label)}"${c.label === card.label ? ' selected' : ''}>${brandOf(c)} •••• ${esc(c.last4 || '')} (${esc(c.label)})</option>`).join('')}</select></div></div>` : ''}
     ${noCard ? `<button class="btn outline" style="margin-top:12px" id="ap-add">${ICON.plus} Add a card</button>` : ''}
-    <div class="note">${ICON.lock}<span>${wallet ? 'The agent never holds your wallet key.' : 'Your card is never shared with the agent.'}</span></div>
-    <button class="btn primary" id="ap-allow" ${noCard ? 'disabled' : ''}>Allow</button>
+    <div class="note">${ICON.lock}<span>${wallet ? 'The agent never holds your wallet key.' : 'Your card is never shared with the agent.'}${passkeysRequired() ? ' Approving needs your passkey.' : ''}</span></div>
+    <button class="btn primary" id="ap-allow" ${noCard ? 'disabled' : ''}>${passkeysRequired() ? ICON.key + ' Approve with passkey' : 'Allow'}</button>
     <button class="btn secondary" id="ap-deny">Deny</button>`;
   $('ap-allow').onclick = () => decide('approve');
   $('ap-deny').onclick = () => decide('deny');
@@ -629,13 +675,24 @@ async function decide(action) {
   const allow = $('ap-allow'), deny = $('ap-deny');
   allow.disabled = deny.disabled = true;
   (action === 'approve' ? allow : deny).innerHTML = '<span class="spinner" style="border-color:rgba(255,255,255,.4);border-top-color:#fff"></span>';
+  const d = approvals[id] || {};
+  const body = {};
+  if (action === 'approve' && !d.rail && chosenCard(id)) body.card = chosenCard(id).label;
+  // With a passkey enrolled, approving needs a fresh assertion bound to
+  // this request and card. A stale state learns it from the 403 and retries.
+  const proof = () => stepUp({ action: 'approve', approval_id: id, card: body.card || '' });
   try {
-    const d = approvals[id] || {};
-    const body = action === 'approve' && !d.rail && chosenCard(id) ? JSON.stringify({ card: chosenCard(id).label }) : '{}';
-    const r = await fetch('/api/approvals/' + id + '/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (action === 'approve' && passkeysRequired()) body.passkey = await proof();
+    try {
+      await postJSON('/api/approvals/' + id + '/' + action, body);
+    } catch (e) {
+      if (e.code !== 'passkey_required' || body.passkey) throw e;
+      state.passkeys = Object.assign({}, state.passkeys, { required: true });
+      body.passkey = await proof();
+      await postJSON('/api/approvals/' + id + '/' + action, body);
+    }
   } catch (e) {
-    toast('Could not reach Valet — try again');
+    toast(e.name === 'NotAllowedError' ? 'Passkey cancelled' : e.status === 403 ? 'Passkey check failed — try again' : 'Could not reach Valet — try again');
     showApproval(approvals[id], true);
     return;
   }
@@ -683,6 +740,16 @@ function renderWallet() {
   h += `</div><button class="btn outline" id="w-add" style="margin-top:${cards.length ? 14 : 0}px">${ICON.plus} Add a card</button>
     <div class="note" style="margin-bottom:0">${ICON.lock}<span>Saved via VGS. Valet swaps the real number in only on the outbound request.</span></div></div>`;
 
+  const pk = s.passkeys || {};
+  if (pk.configured) {
+    const list = pk.passkeys || [];
+    h += '<div class="section"><div class="section-title"><span>Security</span></div><div class="list">';
+    h += list.length ? list.map(p => `<div class="row"><span style="color:var(--primary)">${ICON.key}</span><div class="grow"><div>${esc(p.name)}</div><small>${p.last_used_at ? 'Last used ' + esc(new Date(p.last_used_at).toLocaleString()) : 'Added ' + esc(new Date(p.created_at).toLocaleDateString())}</small></div>
+      <button class="pill-btn danger" data-pk-del="${esc(p.id)}">Remove</button></div>`).join('')
+      : `<div class="row"><span style="color:var(--muted-fg)">${ICON.key}</span><div class="grow"><div>Require a passkey to approve</div><small>Purchases then need Face ID, Touch ID or a security key, not just this page.</small></div></div>`;
+    h += `</div><button class="btn outline" id="pk-add" style="margin-top:10px">${ICON.plus} ${list.length ? 'Add another passkey' : 'Set up a passkey'}</button></div>`;
+  }
+
   const grants = (s.grants || []).filter(g => g.active);
   h += '<div class="section"><div class="section-title"><span>Active budgets</span></div><div class="list">';
   h += grants.length ? grants.map(g => `<div class="row"><div class="grow"><div>${esc(g.handle)}</div><small class="mono">${esc(g.id)}</small></div>
@@ -701,13 +768,25 @@ function renderWallet() {
   const audit = s.audit || [];
   h += '<div class="section"><div class="section-title"><span>Audit log</span><span style="font-weight:400">hash-chained</span></div><div class="list">';
   h += audit.length ? audit.map(e => {
-    const ok = /allow|approve|ok|grant/i.test(e.Decision || '');
+    const ok = /allow|approve|ok|grant|enrolled/i.test(e.Decision || '');
     return `<div class="row"><span style="color:${ok ? 'var(--success)' : 'var(--muted-fg)'}">${ok ? ICON.check : ICON.x}</span><div class="grow"><div class="mono">${esc(e.Edge)} · ${esc(e.Decision)}</div><small>${esc(e.Handle || e.Target || '')}</small></div></div>`;
   }).join('') : '<div class="empty-row">No activity yet.</div>';
   h += '</div></div>';
   $('wallet-body').innerHTML = h;
 
   $('w-add').onclick = startAddCard;
+  if ($('pk-add')) $('pk-add').onclick = async () => {
+    try { await enrollPasskey(); await refreshState(); renderWallet(); toast('Passkey added'); }
+    catch (e) { toast(passkeyError(e)); }
+  };
+  document.querySelectorAll('#wallet-body [data-pk-del]').forEach(b => b.onclick = async () => {
+    const id = b.dataset.pkDel;
+    try {
+      const proof = await stepUp({ action: 'delete', passkey_id: id });
+      await postJSON('/api/passkeys/' + encodeURIComponent(id), { passkey: proof }, 'DELETE');
+      await refreshState(); renderWallet(); toast('Passkey removed');
+    } catch (e) { toast(passkeyError(e)); }
+  });
   document.querySelectorAll('#wallet-body [data-default]').forEach(b => b.onclick = () => setDefault(b.dataset.default));
   document.querySelectorAll('#wallet-body [data-revoke]').forEach(b => b.onclick = () => revoke(b.dataset.revoke));
   document.querySelectorAll('#wallet-body [data-del]').forEach(b => b.onclick = () => {

@@ -57,6 +57,17 @@ type Approval struct {
 	CreatedAt time.Time
 }
 
+// Passkey is an owner WebAuthn credential. Once one exists, approving a
+// grant request needs a fresh assertion from it. Credential is the
+// webauthn.Credential JSON (public key and sign counter, no secrets).
+type Passkey struct {
+	ID         string // base64url credential id
+	Name       string
+	Credential string // JSON
+	CreatedAt  time.Time
+	LastUsedAt *time.Time
+}
+
 // Capture is a pending browser card-capture session. The token is the only
 // auth to the capture page; once completed it's marked used and the card
 // fields land in credentials.
@@ -121,6 +132,13 @@ type Store interface {
 	LastAudit() (*AuditEntry, error)
 	ListAudit(limit int) ([]AuditEntry, error)
 	ListAuditRecent(limit int) ([]AuditEntry, error)
+
+	AddPasskey(p *Passkey) error
+	ListPasskeys() ([]Passkey, error)
+	// TouchPasskey stores the credential after a successful assertion
+	// (new sign counter) and stamps last_used_at.
+	TouchPasskey(id, credential string) error
+	DeletePasskey(id string) error
 
 	Meta(key string) (string, error)
 	SetMeta(key, value string) error
