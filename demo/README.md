@@ -1,6 +1,6 @@
 # Valet agent-commerce demo
 
-A mobile-first "agent buys things for you" demo in the Crossmint style. A Gemini
+A mobile-first "agent buys things for you" demo. A Gemini
 agent chats with you, and when you ask it to buy something it doesn't touch your
 card: it asks Valet for a spend-capped, single-use grant, you approve it on your
 phone, and Valet injects the aliased card into the demo store's checkout request.

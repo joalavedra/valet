@@ -2,56 +2,80 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Valet — enter card</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<title>Valet — add a card</title>
 <script src="https://js.verygoodvault.com/vgs-collect/{{.CollectVersion}}/vgs-collect.js"></script>
 <style>
-  body { font-family: sans-serif; max-width: 400px; margin: 40px auto; }
-  label { display: block; font-size: 13px; margin-bottom: 4px; color: #333; }
-  .form-field { height: 40px; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 14px; box-sizing: border-box; }
+  :root { --fg: #171717; --muted: #f2f2f2; --muted-fg: #737373; --border: #e5e7eb; --primary: #4564ff; --primary-hover: #3653ec; --primary-soft: #b4c0ff; --danger: #dc2626; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; color: var(--fg); background: #fff; -webkit-font-smoothing: antialiased;
+    max-width: 440px; margin: 0 auto; padding: calc(28px + env(safe-area-inset-top)) 20px 32px; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; margin-bottom: 28px; }
+  .brand i { width: 26px; height: 26px; border-radius: 8px; background: var(--primary); color: #fff; display: grid; place-items: center; font-style: normal; font-size: 13px; }
+  h2 { font-size: 26px; font-weight: 500; letter-spacing: -.02em; }
+  p.sub { color: var(--muted-fg); font-size: 14.5px; line-height: 1.45; margin: 8px 0 22px; }
+  label { display: block; font-size: 13px; margin-bottom: 6px; color: var(--muted-fg); }
+  .form-field { height: 48px; border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; transition: border-color .15s, box-shadow .15s; }
+  .form-field:focus-within, .form-field.vgs-collect-container__focused { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(69,100,255,.15); }
   .form-field iframe { width: 100%; height: 100%; border: 0; display: block; }
-  .form-field input { border: none; width: 100%; height: 100%; padding: 0 8px; box-sizing: border-box; }
-  .row { display: flex; gap: 12px; }
-  .row .cell { display: flex; flex-direction: column; }
-  .cell-mm { flex: 0 0 5em; }
-  .cell-yyyy { flex: 0 0 7em; }
+  .form-field input { border: none; outline: none; width: 100%; height: 100%; padding: 0 14px; font: inherit; font-size: 16px; color: var(--fg); background: transparent; }
+  .row { display: flex; gap: 10px; }
+  .row .cell { display: flex; flex-direction: column; min-width: 0; }
+  .cell-mm { flex: 0 0 4.8em; }
+  .cell-yyyy { flex: 0 0 6.4em; }
   .cell-cvc { flex: 1; }
-  button { width: 100%; height: 40px; }
-  #msg { margin-top: 12px; }
+  button { width: 100%; height: 50px; margin-top: 8px; border: 0; border-radius: 999px; background: var(--primary); color: #fff; font: inherit; font-size: 16px; font-weight: 500; cursor: pointer; transition: background .15s; }
+  button:hover { background: var(--primary-hover); }
+  button:disabled { background: var(--primary-soft); cursor: default; }
+  .note { display: flex; align-items: center; gap: 7px; color: var(--muted-fg); font-size: 12.5px; margin-top: 16px; }
+  #msg { margin-top: 14px; font-size: 14px; color: var(--muted-fg); min-height: 1.4em; }
+  #msg.err { color: var(--danger); }
+  #cancel { display: block; text-align: center; margin-top: 12px; color: var(--muted-fg); font-size: 14px; text-decoration: none; }
 </style>
 </head>
 <body>
-<h2>Enter card details</h2>
-<p>This form is served by Valet; card data goes straight to the card vault (VGS), never through Valet.</p>
+<div class="brand"><i>V</i> Valet</div>
+<h2>Add a card</h2>
+<p class="sub">This form is served by Valet, but the card number goes straight to the card vault (VGS). It never passes through Valet or the agent.</p>
 <form id="f">
-  <label for="holder">Card holder</label>
-  <div class="form-field"><input id="holder" placeholder="Name on card" autocomplete="cc-name"></div>
+  <label for="holder">Name on card</label>
+  <div class="form-field"><input id="holder" autocomplete="cc-name"></div>
   <label>Card number</label>
   <div id="cc-number" class="form-field"></div>
   <div class="row">
     <div class="cell cell-mm">
-      <label for="exp_month">MM</label>
-      <div class="form-field"><input id="exp_month" placeholder="MM" inputmode="numeric" maxlength="2"></div>
+      <label for="exp_month">Month</label>
+      <div class="form-field"><input id="exp_month" placeholder="MM" inputmode="numeric" maxlength="2" autocomplete="cc-exp-month"></div>
     </div>
     <div class="cell cell-yyyy">
-      <label for="exp_year">YYYY</label>
-      <div class="form-field"><input id="exp_year" placeholder="YYYY" inputmode="numeric" maxlength="4"></div>
+      <label for="exp_year">Year</label>
+      <div class="form-field"><input id="exp_year" placeholder="YYYY" inputmode="numeric" maxlength="4" autocomplete="cc-exp-year"></div>
     </div>
     <div class="cell cell-cvc">
       <label>CVC</label>
       <div id="cc-cvc" class="form-field"></div>
     </div>
   </div>
-  <button type="submit" id="btn" disabled>Submit</button>
-  <div id="msg"></div>
+  <button type="submit" id="btn" disabled>Save card</button>
+  <div class="note"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><span>Agents only ever get a handle to this card.</span></div>
+  <div id="msg" role="status"></div>
+  <a id="cancel" href="#" hidden>Cancel</a>
 </form>
 <script>
 var state = {};
 var returnURL = {{.ReturnURL}};
+if (returnURL) { var c = document.getElementById('cancel'); c.href = returnURL.split('?')[0]; c.hidden = false; }
+var msgEl = document.getElementById('msg');
+new MutationObserver(function() { msgEl.className = /fail|error|unexpected|please/i.test(msgEl.textContent) ? 'err' : ''; })
+  .observe(msgEl, {childList: true, characterData: true, subtree: true});
 var form = VGSCollect.create({{.VaultID}}, {{.Env}}, function(s) { state = s; document.getElementById('btn').disabled = false; });
-form.field('#cc-number', {name:'number', type:'card-number', placeholder:'Card number',
+form.field('#cc-number', {name:'number', type:'card-number', placeholder:'1234 1234 1234 1234',
+  css:{'font-family':'ui-sans-serif, system-ui, -apple-system, sans-serif','font-size':'16px',color:'#171717',padding:'0 14px','&::placeholder':{color:'#a3a3a3'}},
   validations:['required','validCardNumber'], autoComplete:'cc-number',
   tokenization:{format:'UUID', storage:'PERSISTENT'}});
-form.field('#cc-cvc', {name:'cvc', type:'card-security-code', placeholder:'CVC',
+form.field('#cc-cvc', {name:'cvc', type:'card-security-code', placeholder:'123',
+  css:{'font-family':'ui-sans-serif, system-ui, -apple-system, sans-serif','font-size':'16px',color:'#171717',padding:'0 14px','&::placeholder':{color:'#a3a3a3'}},
   validations:['required','validCardSecurityCode'], autoComplete:'cc-csc',
   tokenization:{format:'NUM_LENGTH_PRESERVING', storage:'VOLATILE'}});
 
@@ -79,7 +103,7 @@ function looksLikeCVC(a) {
 document.getElementById('f').addEventListener('submit', function(e) {
   e.preventDefault();
   var msg = document.getElementById('msg');
-  msg.textContent = 'Tokenizing…';
+  msg.textContent = 'Saving to the vault…';
   form.tokenize(function(status, data) {
     var num = aliasFor(data, 'number');
     var cvc = aliasFor(data, 'cvc');
