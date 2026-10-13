@@ -68,6 +68,7 @@
   <div id="walletView" hidden>
     <section><h2>Pending approvals</h2><div id="pending"></div></section>
     <section><h2>Saved cards &amp; credentials</h2><div id="handles"></div></section>
+    <section><h2>Passkeys</h2><div id="passkeys"></div></section>
     <section><h2>Active grants</h2><div id="grants"></div></section>
     <section><h2>Recent activity</h2><div id="audit"></div></section>
   </div>
@@ -148,6 +149,54 @@
     }
     return h + '</div>';
   }
+  // Passkeys: Valet sends WebAuthn options as JSON with base64url buffers.
+  function b64dec(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); }).buffer; }
+  function b64enc(b) { var a = new Uint8Array(b), s = ''; for (var i = 0; i < a.length; i++) s += String.fromCharCode(a[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+  function ids(list) { return (list || []).map(function (c) { return Object.assign({}, c, { id: b64dec(c.id) }); }); }
+  function passkeyErr(e) { return e && e.name === 'NotAllowedError' ? new Error('Passkey cancelled.') : e; }
+  function stepUp(req) {
+    return api('POST', '/v1/owner/passkeys/challenge', req).then(function (ch) {
+      var pk = ch.options.publicKey;
+      return navigator.credentials.get({ publicKey: Object.assign({}, pk, { challenge: b64dec(pk.challenge), allowCredentials: ids(pk.allowCredentials) }) }).then(function (c) {
+        return { session_id: ch.session_id, assertion: { id: c.id, rawId: b64enc(c.rawId), type: c.type, response: {
+          clientDataJSON: b64enc(c.response.clientDataJSON), authenticatorData: b64enc(c.response.authenticatorData),
+          signature: b64enc(c.response.signature), userHandle: c.response.userHandle ? b64enc(c.response.userHandle) : null } } };
+      });
+    });
+  }
+  function enrollPasskey(required) {
+    return (required ? stepUp({ action: 'register' }) : Promise.resolve(null)).then(function (proof) {
+      return api('POST', '/v1/owner/passkeys/register/begin', proof ? { passkey: proof } : {});
+    }).then(function (begin) {
+      var pk = begin.options.publicKey;
+      return navigator.credentials.create({ publicKey: Object.assign({}, pk, { challenge: b64dec(pk.challenge),
+        user: Object.assign({}, pk.user, { id: b64dec(pk.user.id) }), excludeCredentials: ids(pk.excludeCredentials) }) }).then(function (c) {
+        return api('POST', '/v1/owner/passkeys/register/finish', { session_id: begin.session_id, name: prompt('Name this passkey', 'Passkey') || 'Passkey',
+          credential: { id: c.id, rawId: b64enc(c.rawId), type: c.type, response: { clientDataJSON: b64enc(c.response.clientDataJSON),
+            attestationObject: b64enc(c.response.attestationObject), transports: c.response.getTransports ? c.response.getTransports() : [] } } });
+      });
+    });
+  }
+  function renderPasskeys(pk) {
+    var root = $('passkeys');
+    if (!pk.configured) { root.innerHTML = '<div class="empty">Set <span class="mono">VALET_PASSKEY_ORIGINS</span> to require a passkey for approvals.</div>'; return; }
+    var list = pk.passkeys || [];
+    root.innerHTML = (list.length ? list.map(function (p) {
+      return '<div class="card" data-pk="' + esc(p.id) + '"><div class="row"><span class="v">' + esc(p.name) + '</span><button class="danger pk-del">Remove</button></div><div class="muted">' +
+        (p.last_used_at ? 'Last used ' + esc(when(p.last_used_at)) : 'Added ' + esc(when(p.created_at))) + '</div></div>';
+    }).join('') : '<div class="empty">No passkey. Approvals need only the owner token.</div>') +
+      '<button class="primary" id="pk-add" style="margin-top:8px">' + (list.length ? 'Add another passkey' : 'Require a passkey to approve') + '</button>';
+    $('pk-add').onclick = function () { enrollPasskey(list.length > 0).then(renderWallet).catch(function (e) { fail(passkeyErr(e)); }); };
+    root.querySelectorAll('.pk-del').forEach(function (b) {
+      b.onclick = function () {
+        var id = b.closest('[data-pk]').getAttribute('data-pk');
+        stepUp({ action: 'delete', passkey_id: id }).then(function (proof) {
+          return api('DELETE', '/v1/owner/passkeys/' + encodeURIComponent(id), { passkey: proof });
+        }).then(renderWallet).catch(function (e) { fail(passkeyErr(e)); });
+      };
+    });
+  }
+
   function bindDecisions(root, after) {
     root.querySelectorAll('.card[data-id]').forEach(function (el) {
       var id = el.getAttribute('data-id');
@@ -155,8 +204,17 @@
       function go(action) {
         [allow, deny].forEach(function (b) { if (b) b.disabled = true; });
         var pick = el.querySelector('.card-pick');
-        var body = action === 'approve' && pick ? { handle: pick.value } : undefined;
-        api('POST', '/v1/owner/approvals/' + encodeURIComponent(id) + '/' + action, body).then(function (r) { after(id, r); }).catch(function (e) { fail(e); [allow, deny].forEach(function (b) { if (b) b.disabled = false; }); });
+        var body = action === 'approve' && pick ? { handle: pick.value } : {};
+        var path = '/v1/owner/approvals/' + encodeURIComponent(id) + '/' + action;
+        // With a passkey enrolled Valet answers passkey_required: prove
+        // presence for this request and card, then retry once.
+        api('POST', path, body).catch(function (e) {
+          if (action !== 'approve' || e.message !== 'passkey_required') throw e;
+          return stepUp({ action: 'approve', approval_id: id, handle: body.handle || '' }).then(function (proof) {
+            body.passkey = proof;
+            return api('POST', path, body);
+          });
+        }).then(function (r) { after(id, r); }).catch(function (e) { fail(passkeyErr(e)); [allow, deny].forEach(function (b) { if (b) b.disabled = false; }); });
       }
       if (allow) allow.onclick = function () { go('approve'); };
       if (deny) deny.onclick = function () { go('deny'); };
@@ -188,7 +246,8 @@
 
   function renderWallet() {
     show('wallet');
-    Promise.all([api('GET', '/v1/owner/approvals?status=pending'), api('GET', '/v1/owner/handles'), api('GET', '/v1/owner/grants'), api('GET', '/v1/owner/audit')]).then(function (res) {
+    Promise.all([api('GET', '/v1/owner/approvals?status=pending'), api('GET', '/v1/owner/handles'), api('GET', '/v1/owner/grants'), api('GET', '/v1/owner/audit'), api('GET', '/v1/owner/passkeys')]).then(function (res) {
+      renderPasskeys(res[4]);
       var pend = res[0].approvals || [], handles = res[1].handles || [], grants = (res[2].grants || []).filter(function (g) { return g.active; }), audit = (res[3].audit || []).slice(0, 15);
       var p = $('pending');
       p.innerHTML = pend.length ? pend.map(function (a) { return approvalCard(a, { handles: handles }); }).join('') : '<div class="empty">Nothing waiting for you.</div>';

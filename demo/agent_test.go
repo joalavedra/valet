@@ -268,3 +268,45 @@ func TestCaptureHandlerRejectsUsedLabel(t *testing.T) {
 		t.Fatalf("want 400, got %d", w.Code)
 	}
 }
+
+func TestApproveRelaysCardAndPasskey(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = nil
+		json.NewDecoder(r.Body).Decode(&got)
+		if got["passkey"] == nil {
+			w.WriteHeader(403)
+			w.Write([]byte(`{"error":"passkey_required"}`))
+			return
+		}
+		w.Write([]byte(`{"status":"approved"}`))
+	}))
+	defer srv.Close()
+	a := testApp()
+	a.valet = newValetClient(srv.URL, "agent", "owner")
+	approve := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/approvals/r1/approve", strings.NewReader(body))
+		req.SetPathValue("id", "r1")
+		rec := httptest.NewRecorder()
+		a.decisionHandler("approve")(rec, req)
+		return rec
+	}
+	// Valet's 403 reaches the browser as-is, so the UI knows to run the ceremony.
+	rec := approve(`{"card":"work"}`)
+	if rec.Code != 403 || !strings.Contains(rec.Body.String(), "passkey_required") {
+		t.Fatalf("want relayed 403 passkey_required, got %d %s", rec.Code, rec.Body)
+	}
+	if got["handle"] != "card://work" {
+		t.Fatalf("card label not mapped to handle: %v", got)
+	}
+	rec = approve(`{"card":"work","passkey":{"session_id":"s1","assertion":{"id":"x"}}}`)
+	if rec.Code != 200 {
+		t.Fatalf("approve with passkey: %d %s", rec.Code, rec.Body)
+	}
+	if pk, _ := got["passkey"].(map[string]any); pk["session_id"] != "s1" {
+		t.Fatalf("passkey proof not forwarded: %v", got)
+	}
+	if rec = approve(`{"card":"../x"}`); rec.Code != 400 {
+		t.Fatalf("bad label: want 400, got %d", rec.Code)
+	}
+}

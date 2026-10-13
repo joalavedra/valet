@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -325,5 +326,34 @@ func TestRevokeGrantsForHandle(t *testing.T) {
 	g3, _ := s.GetGrant("g3")
 	if g3.RevokedAt != nil {
 		t.Fatal("g3 for another handle revoked")
+	}
+}
+
+func TestPasskeyRoundTrip(t *testing.T) {
+	s := tempStore(t)
+	if ps, err := s.ListPasskeys(); err != nil || len(ps) != 0 {
+		t.Fatalf("want empty, got %v %v", ps, err)
+	}
+	if err := s.AddPasskey(&Passkey{ID: "cred1", Name: "phone", Credential: `{"signCount":0}`}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddPasskey(&Passkey{ID: "cred1", Name: "dup", Credential: `{}`}); err == nil {
+		t.Fatal("duplicate credential id accepted")
+	}
+	if err := s.TouchPasskey("cred1", `{"signCount":5}`); err != nil {
+		t.Fatal(err)
+	}
+	ps, _ := s.ListPasskeys()
+	if len(ps) != 1 || ps[0].Name != "phone" || ps[0].Credential != `{"signCount":5}` || ps[0].LastUsedAt == nil {
+		t.Fatalf("bad passkey after touch: %+v", ps)
+	}
+	if err := s.TouchPasskey("nope", `{}`); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("touch unknown: want ErrNotFound, got %v", err)
+	}
+	if err := s.DeletePasskey("cred1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeletePasskey("cred1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("re-delete: want ErrNotFound, got %v", err)
 	}
 }

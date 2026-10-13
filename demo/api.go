@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -113,6 +115,9 @@ func (a *app) stateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if g, err := a.valet.ownerList(r.Context(), "/v1/owner/grants"); err == nil {
 		out["grants"] = g["grants"]
+	}
+	if pk, err := a.valet.ownerList(r.Context(), "/v1/owner/passkeys"); err == nil {
+		out["passkeys"] = pk
 	}
 	if au, err := a.valet.ownerList(r.Context(), "/v1/owner/audit"); err == nil {
 		if list, ok := au["audit"].([]any); ok && len(list) > 10 {
@@ -239,25 +244,94 @@ func (a *app) deleteCardHandler(w http.ResponseWriter, r *http.Request) {
 func (a *app) decisionHandler(action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		// Approve may name a different saved card than the agent asked for.
+		// Approve may name a different saved card than the agent asked for,
+		// and carries the passkey proof when the owner has enrolled one.
 		var req struct {
-			Card string `json:"card"`
+			Card    string          `json:"card"`
+			Passkey json.RawMessage `json:"passkey"`
 		}
-		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req)
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req)
 		var body any
-		if action == "approve" && req.Card != "" {
-			if !cardLabelRE.MatchString(req.Card) {
+		if action == "approve" {
+			handle, ok := cardHandle(req.Card)
+			if !ok {
 				writeJSON(w, 400, map[string]string{"error": "bad card label"})
 				return
 			}
-			body = map[string]string{"handle": "card://" + req.Card}
+			m := map[string]any{}
+			if handle != "" {
+				m["handle"] = handle
+			}
+			if len(req.Passkey) > 0 {
+				m["passkey"] = req.Passkey
+			}
+			body = m
 		}
-		out, err := a.valet.ownerActionBody(r.Context(), "/v1/owner/approvals/"+id+"/"+action, body)
-		if err != nil {
-			writeJSON(w, 502, map[string]string{"error": err.Error()})
+		a.ownerPassthrough(w, r, "POST", "/v1/owner/approvals/"+id+"/"+action, body)
+	}
+}
+
+// cardHandle maps a card label from the UI to its handle; "" stays "".
+func cardHandle(label string) (string, bool) {
+	if label == "" {
+		return "", true
+	}
+	if !cardLabelRE.MatchString(label) {
+		return "", false
+	}
+	return "card://" + label, true
+}
+
+func (a *app) ownerPassthrough(w http.ResponseWriter, r *http.Request, method, path string, body any) {
+	code, data, err := a.valet.ownerRaw(r.Context(), method, path, body)
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(data)
+}
+
+// Passkey step-up, relayed to Valet's owner API. The WebAuthn origin is
+// this demo's public URL (VALET_PASSKEY_ORIGINS in compose).
+func (a *app) passkeyChallengeHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action     string `json:"action"`
+		ApprovalID string `json:"approval_id"`
+		Card       string `json:"card"`
+		PasskeyID  string `json:"passkey_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "bad json"})
+		return
+	}
+	handle, ok := cardHandle(req.Card)
+	if !ok {
+		writeJSON(w, 400, map[string]string{"error": "bad card label"})
+		return
+	}
+	a.ownerPassthrough(w, r, "POST", "/v1/owner/passkeys/challenge", map[string]string{
+		"action": req.Action, "approval_id": req.ApprovalID, "handle": handle, "passkey_id": req.PasskeyID,
+	})
+}
+
+func (a *app) passkeyRelay(method, path string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body json.RawMessage
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, 400, map[string]string{"error": "bad json"})
 			return
 		}
-		writeJSON(w, 200, out)
+		p := path
+		if id := r.PathValue("id"); id != "" {
+			p += "/" + url.PathEscape(id)
+		}
+		var out any
+		if len(body) > 0 {
+			out = body
+		}
+		a.ownerPassthrough(w, r, method, p, out)
 	}
 }
 

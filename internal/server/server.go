@@ -74,6 +74,8 @@ type Server struct {
 	// grantLocks serializes edge calls that read+update a grant's spend
 	// so concurrent payments can't overshoot the cumulative total.
 	grantLocks sync.Map // grant id -> *sync.Mutex
+	// pk is the owner passkey step-up for approvals (see passkey.go).
+	pk *passkeys
 }
 
 // lockGrant returns an unlock func holding a per-grant mutex.
@@ -118,6 +120,7 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 		ownerToken:     os.Getenv("VALET_OWNER_TOKEN"),
 		allowPrivate:   os.Getenv("VALET_ALLOW_PRIVATE_UPSTREAMS") == "1",
 		waiters:        map[string]*waiter{},
+		pk:             newPasskeys(),
 	}
 	s.captureReturnOrigins = parseOrigins(os.Getenv("VALET_CAPTURE_RETURN_ORIGINS"))
 	if len(s.captureReturnOrigins) == 0 {
@@ -148,6 +151,11 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 	s.mux.HandleFunc("POST /v1/owner/grants/{id}/revoke", s.ownerAuth(s.ownerRevoke))
 	s.mux.HandleFunc("GET /v1/owner/audit", s.ownerAuth(s.listAudit))
 	s.mux.HandleFunc("POST /v1/owner/captures", s.ownerAuth(s.ownerCaptures))
+	s.mux.HandleFunc("GET /v1/owner/passkeys", s.ownerAuth(s.ownerPasskeys))
+	s.mux.HandleFunc("POST /v1/owner/passkeys/challenge", s.ownerAuth(s.ownerPasskeyChallenge))
+	s.mux.HandleFunc("POST /v1/owner/passkeys/register/begin", s.ownerAuth(s.ownerPasskeyRegisterBegin))
+	s.mux.HandleFunc("POST /v1/owner/passkeys/register/finish", s.ownerAuth(s.ownerPasskeyRegisterFinish))
+	s.mux.HandleFunc("DELETE /v1/owner/passkeys/{id}", s.ownerAuth(s.ownerPasskeyDelete))
 	s.mux.HandleFunc("GET /capture/{token}", s.capturePage)
 	s.mux.HandleFunc("POST /capture/{token}/complete", s.captureComplete)
 	s.mux.HandleFunc("GET /wallet", s.walletPage)
@@ -1812,10 +1820,11 @@ func (s *Server) ownerApprove(w http.ResponseWriter, r *http.Request) {
 	// (same policy, same budget). Only card-for-card: swapping a login or a
 	// wallet would change what the grant can reach, not just how it pays.
 	var body struct {
-		Handle string `json:"handle"`
+		Handle  string  `json:"handle"`
+		Passkey *stepUp `json:"passkey"`
 	}
 	if r.ContentLength != 0 {
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 			return
 		}
@@ -1834,6 +1843,13 @@ func (s *Server) ownerApprove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		issueHandle = c.Handle
+	}
+	// The assertion is bound to this request and the handle as sent, so it
+	// can't approve another request or switch the card after the fact.
+	passkeyID, err := s.passkeyGate(body.Passkey, stepUpBinding("approve", id, body.Handle))
+	if err != nil {
+		writePasskeyErr(w, err)
+		return
 	}
 	ttl := ap.TTL
 	if ttl <= 0 {
@@ -1858,6 +1874,9 @@ func (s *Server) ownerApprove(w http.ResponseWriter, r *http.Request) {
 	d := map[string]string{"request_id": id, "grant_id": g.ID, "via": "owner"}
 	if issueHandle != ap.Handle {
 		d["requested_handle"] = ap.Handle
+	}
+	if passkeyID != "" {
+		d["passkey_id"] = passkeyID
 	}
 	detail, _ := json.Marshal(d)
 	_ = s.chain.Append(&store.AuditEntry{AgentID: ap.AgentID, Handle: issueHandle, Edge: "control", Target: "grant", Decision: "granted", Detail: string(detail)})

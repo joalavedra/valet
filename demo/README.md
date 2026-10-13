@@ -58,6 +58,7 @@ Then in chat: "Buy the coffee beans" → approve the bottom-sheet → receipt.
 | `DEMO_WALLET_LABEL` | `wallet://` label in Valet (default `openfort`) |
 | `DEMO_MPP_SECRET` | MPP realm secret (default: random per boot) |
 | `VALET_CAPTURE_RETURN_ORIGINS` | origins allowed as capture `return_url` (compose sets `DEMO_PUBLIC_URL`) |
+| `VALET_PASSKEY_ORIGINS` | where passkey ceremonies run (compose sets `DEMO_PUBLIC_URL`). Wallet → Security → "Set up a passkey"; after that every approval needs Face ID, Touch ID or a security key |
 | `VGS_CLIENT_ID`/`VGS_CLIENT_SECRET` | service-account OAuth for tokenize + `vgs-route.sh` |
 | `VGS_USERNAME`/`VGS_PASSWORD` | vault access credentials — the outbound proxy auth Valet uses for payments |
 | `VGS_VAULT_ID`/`VGS_ENV` | `tnt…` vault id; `sandbox` (default) or `live` |

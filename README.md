@@ -371,9 +371,35 @@ Configuration (environment):
 | `VALET_PUBLIC_URL` | Public base URL used to build `approve_url` links; relative when unset. |
 | `VALET_CAPTURE_RETURN_ORIGINS` | Comma-separated origins allowed as capture `return_url` targets. Defaults to the `VALET_PUBLIC_URL` origin; when neither is set, any non-empty `return_url` is rejected. |
 | `VALET_ALLOW_PRIVATE_UPSTREAMS` | `1` lets the wallet edges dial non-publicly-routable hosts (LAN/loopback test resources). Default `0`. |
+| `VALET_PASSKEY_ORIGINS` | Comma-separated origins where passkey ceremonies run (the page the owner approves on). Defaults to the `VALET_PUBLIC_URL` origin; when neither is set, passkeys are off. |
+| `VALET_PASSKEY_RP_ID` | WebAuthn relying-party id. Defaults to the first passkey origin's host. A passkey only works on origins under this domain. |
 
 Pages: `GET /wallet` (all pending requests + active grants) and
 `GET /approve/<id>` serve the bundled `wallet.html` SPA.
+
+**Choosing the card.** `POST /v1/owner/approvals/<id>/approve` takes an
+optional `{"handle": "card://<label>"}` to approve a card request with a
+different saved card. The policy and budget are unchanged. Only
+card-for-card swaps are allowed, and the audit entry records
+`requested_handle`.
+
+**Passkey step-up.** Once the owner enrolls a passkey (from `/wallet`, or
+`POST /v1/owner/passkeys/register/{begin,finish}`), approving needs a fresh
+WebAuthn assertion as well as the owner token:
+
+1. `POST /v1/owner/passkeys/challenge` `{"action":"approve","approval_id":…,"handle":…}`
+   returns `{session_id, options}`. Pass `options.publicKey` to `navigator.credentials.get`.
+2. Approve with `{"handle":…, "passkey": {"session_id":…, "assertion": <PublicKeyCredential JSON>}}`.
+
+Without the proof, approve returns `403 {"error":"passkey_required"}`.
+Each challenge is single-use, expires after 5 minutes, and is bound to
+one request and the handle as sent, so a proof can't approve a different
+request or switch the card. Deny never needs a passkey. The first passkey
+enrolls with the owner token alone. Enrolling another (`action:"register"`)
+or removing one (`DELETE /v1/owner/passkeys/<id>`, `action:"delete"`)
+needs a proof from an enrolled passkey, so a leaked owner token can't add
+its own authenticator. If passkeys are enrolled but `VALET_PASSKEY_*` is
+later unset, approvals fail closed with `503`.
 
 **Security.** The wallet edges (x402/MPP) refuse to dial
 non-publicly-routable upstreams — loopback, RFC1918, link-local, CGNAT,
