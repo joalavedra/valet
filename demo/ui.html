@@ -3,176 +3,538 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0b0d10">
+<meta name="theme-color" content="#ffffff">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="manifest" href="/manifest.webmanifest">
 <title>Valet Shop</title>
 <style>
-  * { box-sizing: border-box; margin: 0; }
-  body { font-family: -apple-system, 'Segoe UI', system-ui, sans-serif; background: #0b0d10; color: #e8eaed;
-         height: 100dvh; display: flex; flex-direction: column; max-width: 520px; margin: 0 auto; }
-  header { padding: 14px 16px 8px; font-weight: 600; font-size: 15px; display:flex; align-items:center; gap:8px; }
-  header .dot { width:8px; height:8px; border-radius:50%; background:#4ade80; }
-  #views { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
-  .view { flex:1; overflow-y:auto; padding: 12px 16px 20px; display:none; }
-  .view.active { display:block; }
-  #chat-view { display:none; flex-direction:column; }
-  #chat-view.active { display:flex; }
-  #messages { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding-bottom:12px; }
-  .bubble { padding: 10px 14px; border-radius: 16px; max-width: 85%; font-size: 15px; line-height: 1.35; white-space: pre-wrap; }
-  .bubble.user { background: #2563eb; align-self: flex-end; border-bottom-right-radius: 4px; }
-  .bubble.bot { background: #1f2430; align-self: flex-start; border-bottom-left-radius: 4px; }
-  .sys { align-self: center; font-size: 12px; color: #8b93a5; padding: 4px 10px; }
-  .receipt { background: #14231a; border: 1px solid #1f4d33; align-self: stretch; padding: 12px 14px; border-radius: 14px; font-size: 14px; }
-  .receipt .amt { font-size: 20px; font-weight: 700; }
-  #composer { display:flex; gap:8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
-  #composer input { flex:1; background:#161a22; border:1px solid #2a3140; color:#e8eaed; border-radius: 20px; padding: 12px 16px; font-size: 16px; }
-  #composer button { background:#2563eb; border:none; color:#fff; border-radius:20px; padding:0 18px; font-size:15px; }
-  .chips { display:flex; gap:8px; padding: 0 12px 8px; flex-wrap: wrap; }
-  .chip { background:#161a22; border:1px solid #2a3140; border-radius:16px; padding:6px 12px; font-size:13px; color:#c7cdd9; cursor:pointer; }
-  nav { display:flex; border-top:1px solid #1c212c; padding-bottom: env(safe-area-inset-bottom); }
-  nav button { flex:1; background:none; border:none; color:#8b93a5; font-size:13px; padding:12px; }
-  nav button.on { color:#fff; }
-  .card { background:#161a22; border:1px solid #2a3140; border-radius:14px; padding:14px; margin-bottom:12px; }
-  .card .t { font-size:13px; color:#8b93a5; text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px; }
-  .big { font-size:18px; font-weight:600; }
-  .btn { display:block; width:100%; padding:13px; border:none; border-radius:12px; font-size:15px; font-weight:600; margin-top:8px; cursor:pointer; }
-  .btn.primary { background:#2563eb; color:#fff; }
-  .btn.deny { background:#2a3140; color:#e8eaed; }
-  .btn.danger { background:#7f1d1d; color:#fecaca; padding:8px; font-size:13px; width:auto; display:inline-block; }
-  #sheet { position:fixed; inset:auto 0 0 0; background:#12161e; border-radius:20px 20px 0 0; padding:22px 20px calc(20px + env(safe-area-inset-bottom));
-           transform:translateY(110%); transition:transform .25s ease; max-width:520px; margin:0 auto; left:0; right:0; box-shadow:0 -8px 40px rgba(0,0,0,.6); z-index:10; }
-  #sheet.open { transform:translateY(0); }
-  #sheet .amt { font-size:34px; font-weight:700; margin:8px 0; }
-  #sheet .row { display:flex; justify-content:space-between; font-size:14px; color:#aeb6c6; padding:5px 0; }
-  #toast { position:fixed; top:14px; left:50%; transform:translateX(-50%); background:#1f2430; padding:10px 18px; border-radius:20px; font-size:14px; display:none; z-index:20; }
-  .muted { color:#8b93a5; font-size:12px; }
-  .grant { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid #222936; font-size:14px; }
-  .mono { font-family:ui-monospace,monospace; font-size:12px; }
-  #loader { text-align:center; padding:24px; color:#8b93a5; }
+  /* Tokens: white ground, neutral text, one blue accent. Retheme here. */
+  :root {
+    --bg: #ffffff; --fg: #171717; --muted: #f2f2f2; --muted-strong: #e4e4e4;
+    --muted-fg: #737373; --border: #e5e7eb; --primary: #4564ff; --primary-hover: #3653ec;
+    --primary-soft: #b4c0ff; --success: #16a34a; --danger: #dc2626; --canvas: #fafafa;
+    --frame-border: #c8c3bd; --radius: 14px;
+    --ease: cubic-bezier(.22, 1, .36, 1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    color: var(--fg); background: var(--bg); -webkit-font-smoothing: antialiased;
+    font-size: 15px; line-height: 1.4;
+  }
+  button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+  button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  a { color: var(--primary); text-decoration: none; }
+  svg { flex-shrink: 0; }
+  .tnum { font-variant-numeric: tabular-nums; }
+
+  /* On a phone the app is the viewport; on a desktop it is a phone on a dot grid. */
+  #phone { position: relative; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+  @media (min-width: 768px) {
+    body { background: var(--canvas); display: grid; place-items: center; min-height: 100vh;
+      background-image: radial-gradient(color-mix(in srgb, var(--frame-border) 40%, transparent) 1px, transparent 1px);
+      background-size: 28px 28px; }
+    #phone { width: 402px; height: min(860px, calc(100vh - 48px)); border-radius: 52px;
+      border: 10px solid #f7f7f7; outline: 1px solid var(--frame-border);
+      box-shadow: 0 30px 80px -20px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.02); }
+  }
+
+  header { display: flex; align-items: center; gap: 8px; padding: calc(14px + env(safe-area-inset-top)) 20px 10px; }
+  header h1 { font-size: 26px; font-weight: 500; letter-spacing: -.02em; flex: 1; }
+  .icon-btn { width: 36px; height: 36px; border-radius: 999px; background: var(--muted); display: grid; place-items: center; transition: background .15s; }
+  .icon-btn:hover { background: var(--muted-strong); }
+  .avatar { width: 36px; height: 36px; border-radius: 999px; background: var(--muted); color: var(--primary); display: grid; place-items: center; font-size: 13px; font-weight: 600; }
+  .icon-btn .dot { position: absolute; }
+
+  /* Thread */
+  #thread { flex: 1; overflow-y: auto; scrollbar-width: none; padding: 8px 20px 16px; display: flex; flex-direction: column; gap: 8px; }
+  #thread::-webkit-scrollbar { display: none; }
+  #thread > :first-child { margin-top: auto; }
+  .msg { max-width: 82%; padding: 10px 15px; border-radius: 20px; white-space: pre-wrap; word-wrap: break-word; font-size: 15px; line-height: 1.4; }
+  .msg.user { align-self: flex-end; background: var(--primary); color: #fff; }
+  .msg.agent { align-self: flex-start; background: var(--muted); }
+  .enter { animation: enter-up 340ms var(--ease) backwards; }
+  @keyframes enter-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+  .activity { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted-fg); padding: 2px 2px; }
+  .activity .ic { width: 15px; height: 15px; display: grid; place-items: center; }
+  .spinner { width: 13px; height: 13px; border-radius: 999px; border: 1.75px solid var(--muted-strong); border-top-color: var(--primary); animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .typing { align-self: flex-start; background: var(--muted); border-radius: 20px; padding: 13px 15px; display: flex; gap: 4px; }
+  .typing i { width: 6px; height: 6px; border-radius: 999px; background: #a3a3a3; animation: blink 1.2s infinite ease-in-out; }
+  .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .3; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
+
+  /* Panels in the thread: approval, receipt */
+  .panel { align-self: stretch; border: 1px solid var(--border); border-radius: 18px; padding: 14px 16px; background: var(--bg); font-size: 13.5px; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+  .panel-title { font-weight: 600; font-size: 14px; }
+  .badge { font-size: 11.5px; padding: 2px 8px; border-radius: 999px; background: var(--muted); color: var(--muted-fg); white-space: nowrap; }
+  .badge.ok { background: #e8f7ee; color: var(--success); }
+  .badge.no { background: #fdecec; color: var(--danger); }
+  .kv { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 0; }
+  .kv > span:first-child { color: var(--muted-fg); flex-shrink: 0; }
+  .kv > span:last-child { text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; justify-content: flex-end; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
+  .tile { width: 34px; height: 34px; border-radius: 999px; background: var(--muted); display: grid; place-items: center; font-size: 17px; flex-shrink: 0; }
+  .merchant { display: flex; align-items: center; gap: 10px; }
+  .merchant b { display: block; font-size: 14px; font-weight: 600; }
+  .merchant small { color: var(--muted-fg); font-size: 12px; }
+  .total { display: flex; justify-content: space-between; font-weight: 600; font-size: 14.5px; }
+
+  /* Product shelf */
+  .shelf { align-self: stretch; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; margin: 0 -20px; padding: 2px 20px 4px; scroll-snap-type: x mandatory; }
+  .shelf::-webkit-scrollbar { display: none; }
+  .product { flex: 0 0 140px; scroll-snap-align: start; text-align: left; border: 1px solid var(--border); border-radius: 16px; padding: 12px; display: flex; flex-direction: column; gap: 8px; transition: border-color .15s, transform .15s; }
+  .product:hover { border-color: var(--primary-soft); }
+  .product:active { transform: scale(.98); }
+  .product .art { height: 72px; border-radius: 10px; background: var(--muted); display: grid; place-items: center; font-size: 32px; }
+  .product .name { font-size: 13px; line-height: 1.25; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.5em; }
+  .product .price { font-size: 13px; font-weight: 600; }
+
+  /* Empty state */
+  #empty { display: flex; flex-direction: column; gap: 18px; padding: 0 0 6px; }
+  #empty h2 { font-size: 24px; font-weight: 500; letter-spacing: -.02em; line-height: 1.2; }
+  #empty p { color: var(--muted-fg); font-size: 14.5px; margin-top: 6px; }
+  .starters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .starter { text-align: left; border: 1px solid var(--border); border-radius: 16px; padding: 12px 13px; font-size: 13.5px; display: flex; flex-direction: column; gap: 6px; transition: border-color .15s, background .15s; }
+  .starter:hover { border-color: var(--primary-soft); background: #fafbff; }
+  .starter span { font-size: 18px; }
+
+  /* Composer */
+  #composer { padding: 6px 16px calc(14px + env(safe-area-inset-bottom)); }
+  #composer form { display: flex; align-items: center; gap: 6px; background: var(--muted); border-radius: 999px; padding: 5px 5px 5px 18px; border: 1px solid transparent; transition: border-color .15s, background .15s; }
+  #composer form:focus-within { border-color: var(--primary-soft); background: #fff; }
+  #msg { flex: 1; border: 0; background: transparent; font: inherit; font-size: 16px; color: var(--fg); outline: none; min-width: 0; padding: 7px 0; }
+  #msg::placeholder { color: #a3a3a3; }
+  #send { width: 36px; height: 36px; border-radius: 999px; background: var(--primary); color: #fff; display: grid; place-items: center; transition: opacity .15s, background .15s; }
+  #send:hover { background: var(--primary-hover); }
+  #send:disabled { opacity: .35; cursor: default; }
+
+  /* Bottom sheets */
+  .scrim { position: absolute; inset: 0; background: rgba(0,0,0,.28); opacity: 0; pointer-events: none; transition: opacity .25s; z-index: 10; }
+  .scrim.open { opacity: 1; pointer-events: auto; }
+  .sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 11; background: var(--bg); border-radius: 28px 28px 0 0;
+    padding: 18px 20px calc(20px + env(safe-area-inset-bottom)); transform: translateY(105%); transition: transform .38s var(--ease);
+    max-height: 92%; overflow-y: auto; scrollbar-width: none; box-shadow: 0 -10px 40px rgba(0,0,0,.08); }
+  .sheet::-webkit-scrollbar { display: none; }
+  .sheet.open { transform: none; }
+  .sheet.tall { height: 92%; }
+  .sheet-close { position: sticky; top: 0; margin-left: auto; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 999px; background: var(--muted); z-index: 1; }
+  .sheet h2 { font-size: 22px; font-weight: 500; letter-spacing: -.02em; line-height: 1.2; margin-top: 4px; }
+  .sheet .sub { color: var(--muted-fg); font-size: 14px; margin-top: 6px; }
+  .table { border: 1px solid var(--border); border-radius: var(--radius); margin-top: 18px; overflow: hidden; }
+  .table .kv { padding: 12px 15px; font-size: 14.5px; }
+  .table .kv + .kv { border-top: 1px solid var(--border); }
+  .table .amount { font-size: 17px; font-weight: 600; }
+  .table .kv.wrap { align-items: flex-start; }
+  .table .kv.wrap > span:last-child { white-space: normal; text-align: right; }
+  .note { display: flex; align-items: center; gap: 7px; color: var(--muted-fg); font-size: 12.5px; margin: 14px 2px 16px; }
+  .btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 50px; border-radius: 999px; font-size: 16px; font-weight: 500; transition: background .15s, opacity .15s, transform .1s; }
+  .btn:active { transform: scale(.985); }
+  .btn + .btn { margin-top: 10px; }
+  .btn.primary { background: var(--primary); color: #fff; }
+  .btn.primary:hover { background: var(--primary-hover); }
+  .btn.primary:disabled { background: var(--primary-soft); cursor: default; }
+  .btn.secondary { background: var(--muted); }
+  .btn.secondary:hover { background: var(--muted-strong); }
+  .btn.outline { border: 1px solid var(--border); height: 46px; font-size: 15px; }
+  .btn.outline:hover { background: var(--muted); }
+  .done-state { display: flex; flex-direction: column; gap: 14px; padding: 18px 0 30px; }
+  .done-state .check { width: 60px; height: 60px; border-radius: 999px; background: var(--primary); display: grid; place-items: center; animation: pop .45s cubic-bezier(.34,1.56,.64,1); }
+  .done-state.denied .check { background: var(--muted-strong); }
+  @keyframes pop { from { transform: scale(.5); opacity: 0; } to { transform: none; opacity: 1; } }
+  .done-state h2 { animation: enter-up 340ms var(--ease) 120ms backwards; }
+  .done-state .sub { animation: enter-up 340ms var(--ease) 200ms backwards; }
+
+  /* Wallet */
+  .section { margin-top: 24px; }
+  .section-title { font-size: 13px; font-weight: 600; color: var(--muted-fg); margin-bottom: 8px; display: flex; justify-content: space-between; }
+  .cards { display: flex; flex-direction: column; gap: 10px; }
+  .cc { position: relative; border-radius: 16px; padding: 16px; color: #fff; aspect-ratio: 1.586; max-height: 196px; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden;
+    background: linear-gradient(135deg, #1f2937, #111827); text-align: left; width: 100%; transition: transform .15s; }
+  .cc:hover { transform: translateY(-1px); }
+  .cc.c1 { background: linear-gradient(135deg, #4564ff, #2a3fbf); }
+  .cc.c2 { background: linear-gradient(135deg, #0f766e, #134e4a); }
+  .cc.c3 { background: linear-gradient(135deg, #9333ea, #581c87); }
+  .cc::after { content: ''; position: absolute; right: -40px; top: -60px; width: 200px; height: 200px; border-radius: 999px; background: rgba(255,255,255,.08); }
+  .cc .top, .cc .bottom { display: flex; justify-content: space-between; align-items: center; position: relative; z-index: 1; }
+  .cc .label { font-size: 14px; font-weight: 500; text-transform: capitalize; }
+  .cc .pan { font-size: 17px; letter-spacing: .08em; font-variant-numeric: tabular-nums; }
+  .cc .chip-pill { font-size: 11px; background: rgba(255,255,255,.18); padding: 3px 9px; border-radius: 999px; backdrop-filter: blur(4px); }
+  .cc .brand { font-weight: 700; font-style: italic; font-size: 16px; letter-spacing: .02em; }
+  .card-actions { display: flex; gap: 8px; margin-top: -2px; }
+  .pill-btn { font-size: 12.5px; padding: 6px 12px; border-radius: 999px; background: var(--muted); }
+  .pill-btn:hover { background: var(--muted-strong); }
+  .pill-btn.danger { color: var(--danger); }
+  .pill-btn.danger.armed { background: var(--danger); color: #fff; }
+  .list { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 11px 14px; font-size: 13.5px; }
+  .row + .row { border-top: 1px solid var(--border); }
+  .row .grow { flex: 1; min-width: 0; }
+  .row .grow div:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row small { color: var(--muted-fg); font-size: 12px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty-row { padding: 14px; color: var(--muted-fg); font-size: 13.5px; }
+  .mono { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12px; }
+  .field { margin-top: 18px; }
+  .field label { display: block; font-size: 13px; color: var(--muted-fg); margin-bottom: 6px; }
+  .field input { width: 100%; height: 48px; border: 1px solid var(--border); border-radius: 12px; padding: 0 14px; font: inherit; font-size: 16px; outline: none; transition: border-color .15s, box-shadow .15s; }
+  .field input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(69,100,255,.15); }
+  .field .hint { font-size: 12px; color: var(--muted-fg); margin-top: 6px; }
+  .field .err { color: var(--danger); }
+
+  .mark-mc { display: inline-flex; width: 22px; height: 15px; border: 1px solid var(--border); border-radius: 3px; align-items: center; justify-content: center; background: #fff; }
+  .mark-mc i { width: 8px; height: 8px; border-radius: 999px; display: block; }
+  .mark-visa { display: inline-grid; place-items: center; width: 22px; height: 15px; border: 1px solid var(--border); border-radius: 3px; font-size: 6.5px; font-weight: 800; font-style: italic; color: #1a1f71; background: #fff; }
+
+  #toast { position: absolute; top: calc(14px + env(safe-area-inset-top)); left: 50%; transform: translate(-50%, -12px); background: var(--fg); color: #fff;
+    padding: 9px 16px; border-radius: 999px; font-size: 13.5px; opacity: 0; pointer-events: none; transition: opacity .2s, transform .25s var(--ease); z-index: 30; white-space: nowrap; }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; transition-duration: 1ms !important; }
+  }
 </style>
 </head>
 <body>
-<header><span class="dot"></span> Valet Shop <span class="muted" id="sub"></span></header>
-<div id="views">
-  <div id="chat-view" class="view active">
-    <div id="messages"></div>
-    <div class="chips">
-      <button class="chip" onclick="ask('What can I buy?')">What can I buy?</button>
-      <button class="chip" onclick="ask('Buy the coffee beans')">Buy the coffee beans</button>
+<div id="phone">
+  <header>
+    <h1>Chat</h1>
+    <button class="icon-btn" id="open-wallet" aria-label="Wallet">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
+    </button>
+    <div class="avatar" aria-hidden="true">V</div>
+  </header>
+
+  <main id="thread" aria-live="polite">
+    <div id="empty">
+      <div>
+        <h2>What should I buy for you?</h2>
+        <p>I shop at the Valet demo store. Every purchase needs your approval, and I never see your card.</p>
+      </div>
+      <div class="starters" id="starters"></div>
     </div>
-    <div id="composer">
-      <input id="msg" placeholder="Message the shopping agent" autocomplete="off">
-      <button id="send">Send</button>
-    </div>
+  </main>
+
+  <div id="composer">
+    <form id="composer-form">
+      <input id="msg" placeholder="Ask the agent to buy something" autocomplete="off" enterkeyhint="send" aria-label="Message">
+      <button id="send" type="submit" aria-label="Send" disabled>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+      </button>
+    </form>
   </div>
-  <div id="wallet-view" class="view">
-    <div id="wallet-body"><div id="loader">Loading…</div></div>
-  </div>
+
+  <div class="scrim" id="scrim"></div>
+
+  <!-- Approval: the agent asks for a spend-capped, single-use grant. -->
+  <section class="sheet" id="approve-sheet" role="dialog" aria-modal="true" aria-labelledby="ap-title">
+    <button class="sheet-close" data-close aria-label="Close"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    <div id="ap-body"></div>
+  </section>
+
+  <!-- Wallet: cards, live budgets, orders, audit. -->
+  <section class="sheet tall" id="wallet-sheet" role="dialog" aria-modal="true" aria-labelledby="wallet-title">
+    <button class="sheet-close" data-close aria-label="Close"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    <h2 id="wallet-title">Wallet</h2>
+    <p class="sub">Cards live in the vault. The agent only ever holds a handle.</p>
+    <div id="wallet-body"></div>
+  </section>
+
+  <!-- Add card: pick a label, then hand off to the Valet capture page. -->
+  <section class="sheet" id="add-sheet" role="dialog" aria-modal="true" aria-labelledby="add-title">
+    <button class="sheet-close" data-close aria-label="Close"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    <h2 id="add-title">Add a card</h2>
+    <p class="sub">The number goes straight to the card vault (VGS). It never touches this app or the agent.</p>
+    <form id="add-form">
+      <div class="field">
+        <label for="add-label">Name this card</label>
+        <input id="add-label" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="32">
+        <div class="hint" id="add-hint">Lowercase letters, numbers and dashes.</div>
+      </div>
+      <div style="margin-top:20px"><button class="btn primary" type="submit" id="add-go">Continue</button></div>
+    </form>
+  </section>
+
+  <div id="toast" role="status"></div>
 </div>
-<div id="sheet">
-  <div class="muted">Payment approval</div>
-  <div class="amt" id="sh-amt"></div>
-  <div class="row"><span>Agent</span><span>Valet Shopping Agent</span></div>
-  <div class="row"><span>Merchant</span><span id="sh-merchant"></span></div>
-  <div class="row"><span>Purpose</span><span id="sh-purpose" style="text-align:right;max-width:70%"></span></div>
-  <div class="row"><span>Expires</span><span id="sh-exp"></span></div>
-  <button class="btn primary" id="sh-allow">Allow</button>
-  <button class="btn deny" id="sh-deny">Deny</button>
-</div>
-<div id="toast"></div>
-<nav>
-  <button id="tab-chat" class="on">Chat</button>
-  <button id="tab-wallet">Wallet</button>
-</nav>
+
 <script>
 const $ = id => document.getElementById(id);
 const conv = 'conv_' + Math.random().toString(36).slice(2, 10);
-let sheetReq = null;
+const AGENT = 'Valet Shopping Agent';
+
+let state = { cards: [], default_card: '' };
+let catalog = {};             // product id → product
+let busy = false;
+let sheetReq = null;          // request id shown in the approval sheet
 let currentApprovalId = null;
+const approvalPanels = {};    // request id → in-thread panel
+const approvals = {};         // request id → last approval_required payload
+let lastProduct = null;       // the product the agent is buying, for the receipt
+
+const ICON = {
+  check: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="m8 12.5 2.7 2.7L16 9.8"/></svg>',
+  x: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9.5"/><path d="m9 9 6 6M15 9l-6 6"/></svg>',
+  lock: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+  plus: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  bigcheck: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
+  bigx: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#525252" stroke-width="2.6" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+};
 
 function money(c) { return '$' + (c / 100).toFixed(2); }
-function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-function toast(t) { const el = $('toast'); el.textContent = t; el.style.display = 'block'; setTimeout(() => el.style.display = 'none', 3000); }
-
-function bubble(cls, text) {
-  const d = document.createElement('div');
-  d.className = cls; d.innerHTML = text;
-  $('messages').appendChild(d); $('messages').scrollTop = $('messages').scrollHeight;
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+function toast(t) { const el = $('toast'); el.textContent = t; el.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('show'), 2600); }
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
-function receipt(o) {
-  let line = `<div>${esc(o.order_id)} · card ****${esc(o.last4 || '')}</div>`;
-  if (o.tx) {
-    const short = o.tx.slice(0, 10) + '…';
-    line = `<div>${esc(o.order_id)} · ${esc(o.rail || '')} ${o.explorer_url ? `<a href="${esc(o.explorer_url)}" style="color:#7dd3fc">${esc(short)}</a>` : esc(short)} · ${esc(o.network || '')}</div>`;
+function brandOf(c) {
+  const b = (c && c.bin) || '';
+  if (b[0] === '4') return 'Visa';
+  if (b[0] === '5' || b[0] === '2') return 'Mastercard';
+  if (b[0] === '3') return 'Amex';
+  return 'Card';
+}
+function cardMark(c) {
+  const brand = brandOf(c);
+  if (brand === 'Mastercard') return '<span class="mark-mc" aria-hidden="true"><i style="background:#eb001b"></i><i style="background:#f79e1b;margin-left:-3px;opacity:.9"></i></span>';
+  if (brand === 'Visa') return '<span class="mark-visa" aria-hidden="true">VISA</span>';
+  return '';
+}
+function cardName(c) { return c ? `${brandOf(c)} •••• ${esc(c.last4 || '····')}` : ''; }
+function defaultCard() { return (state.cards || []).find(c => c.label === state.default_card) || (state.cards || [])[0]; }
+function productFromArgs(args) {
+  const m = /product=([\w-]+)/.exec(args || '');
+  return m ? catalog[m[1]] : null;
+}
+function priceOf(p) { return p.currency === 'USD' ? money(p.price_cents) : `${(p.price_cents / 100).toFixed(2)} ${p.currency}`; }
+
+/* ---------- Thread ---------- */
+const thread = $('thread');
+function stick() { requestAnimationFrame(() => { thread.scrollTop = thread.scrollHeight; }); }
+function add(el) {
+  if ($('empty')) $('empty').remove();
+  el.classList.add('enter');
+  const typing = thread.querySelector('.typing');
+  typing ? thread.insertBefore(el, typing) : thread.appendChild(el);
+  stick();
+  return el;
+}
+function node(cls, html) { const d = document.createElement('div'); d.className = cls; d.innerHTML = html; return d; }
+function say(who, text) { return add(node('msg ' + who, esc(text))); }
+
+function activity(text, status) {
+  const el = node('activity', '<span class="ic"></span><span class="t"></span>');
+  setActivity(el, text, status);
+  return add(el);
+}
+function setActivity(el, text, status) {
+  el.dataset.status = status;
+  el.querySelector('.ic').innerHTML = status === 'run' ? '<span class="spinner"></span>' : status === 'fail' ? ICON.x : ICON.check;
+  if (text) el.querySelector('.t').textContent = text;
+}
+function settleActivities() {
+  thread.querySelectorAll('.activity[data-status="run"]').forEach(el => setActivity(el, el.dataset.doneText, 'ok'));
+}
+
+function typing(on) {
+  const t = thread.querySelector('.typing');
+  if (on && !t) { thread.appendChild(node('typing', '<i></i><i></i><i></i>')); stick(); }
+  if (!on && t) t.remove();
+}
+
+const TOOL_TEXT = {
+  list_products: () => ['Looking through the store…', 'Looked through the store'],
+  checkout: p => [`Going to checkout${p ? ' · ' + p.name : ''}`, 'Went to payment'],
+  buy_with_wallet: p => [`Paying from your wallet${p ? ' · ' + p.name : ''}`, 'Went to payment'],
+};
+function onTool(d) {
+  settleActivities();
+  const p = productFromArgs(d.args);
+  if (p) lastProduct = p;
+  const [run, done] = (TOOL_TEXT[d.name] || (() => [d.name.replace(/_/g, ' ') + '…', d.name.replace(/_/g, ' ')]))(p);
+  const el = activity(run, 'run');
+  el.dataset.doneText = done;
+  if (d.name === 'list_products') shelf();
+}
+
+function shelf() {
+  const items = Object.values(catalog);
+  if (!items.length) return;
+  const s = node('shelf', '');
+  items.forEach(p => {
+    const b = document.createElement('button');
+    b.className = 'product';
+    b.innerHTML = `<div class="art">${esc(p.emoji)}</div><div class="name">${esc(p.name)}</div><div class="price tnum">${esc(priceOf(p))}</div>`;
+    b.onclick = () => ask(`Buy the ${p.name}`);
+    s.appendChild(b);
+  });
+  add(s);
+}
+
+function approvalPanel(d) {
+  if (approvalPanels[d.request_id]) return approvalPanels[d.request_id];
+  const card = defaultCard();
+  const limit = d.rail ? (d.rail === 'mpp' ? '0.01 pathUSD' : '0.01 USDC') : money(d.amount_cents || 0);
+  const how = d.rail ? `<span>Rail</span><span>${esc(d.rail)}</span>` : `<span>Card</span><span>${cardMark(card)}${cardName(card)}</span>`;
+  const el = node('panel', `
+    <div class="panel-head"><span class="panel-title">${esc(lastProduct ? lastProduct.name : 'Purchase')}</span><span class="badge" data-badge>Waiting for you</span></div>
+    <div class="kv"><span>Limit</span><span class="tnum">${esc(limit)}</span></div>
+    <div class="kv">${how}</div>
+    <div class="kv"><span>Store</span><span>${esc(d.merchant || 'Valet Demo Store')}</span></div>`);
+  el.style.cursor = 'pointer';
+  el.onclick = () => { if (el.dataset.final !== '1') showApproval(d, true); };
+  approvalPanels[d.request_id] = el;
+  return add(el);
+}
+function finishApprovalPanel(id, approved) {
+  const el = approvalPanels[id];
+  if (!el || el.dataset.final === '1') return;
+  el.dataset.final = '1'; el.style.cursor = '';
+  const b = el.querySelector('[data-badge]');
+  b.textContent = approved ? 'Approved' : 'Denied';
+  b.className = 'badge ' + (approved ? 'ok' : 'no');
+  if (!approved) {
+    const pay = [...thread.querySelectorAll('.activity')].filter(a => a.dataset.doneText === 'Went to payment').pop();
+    if (pay) { pay.dataset.doneText = 'Checkout stopped'; setActivity(pay, 'Checkout stopped', 'fail'); }
   }
-  bubble('receipt', `<div class="amt">${money(o.total_cents)}</div>${line}<div class="muted">Paid via Valet</div>`);
+  const card = defaultCard();
+  activity(approved ? `Budget approved${card ? ' · ' + brandOf(card) + ' •••• ' + (card.last4 || '') : ''}` : 'You denied the request', approved ? 'ok' : 'fail');
 }
 
+function receipt(o) {
+  settleActivities();
+  const pay = [...thread.querySelectorAll('.activity')].filter(el => el.dataset.doneText === 'Went to payment').pop();
+  if (pay) setActivity(pay, 'Order placed', 'ok');
+  const p = lastProduct;
+  const qty = 1;
+  let paidWith;
+  if (o.tx) {
+    const short = o.tx.slice(0, 8) + '…' + o.tx.slice(-4);
+    paidWith = `<span class="mono">${o.explorer_url ? `<a href="${esc(o.explorer_url)}" target="_blank" rel="noopener">${esc(short)}</a>` : esc(short)}</span><span style="color:var(--muted-fg)">${esc(o.rail || '')}${o.network ? ' · ' + esc(o.network) : ''}</span>`;
+  } else {
+    const card = (state.cards || []).find(c => c.last4 === o.last4) || { last4: o.last4 };
+    paidWith = `<span style="display:inline-flex;align-items:center;gap:6px">${cardMark(card)}${cardName(card)}</span><span style="color:var(--muted-fg)">Approved</span>`;
+  }
+  add(node('panel', `
+    <div class="merchant"><span class="tile">${esc(p ? p.emoji : '🛍️')}</span><div><b>Valet Demo Store</b><small>Order #${esc(o.order_id || '')}</small></div></div>
+    <hr>
+    ${p ? `<div class="kv" style="padding:2px 0"><span style="color:var(--fg)">${esc(p.name)}${qty > 1 ? ' × ' + qty : ''}</span><span class="tnum">${esc(o.tx ? priceOf(p) : money(o.total_cents))}</span></div>` : ''}
+    <hr>
+    <div class="total"><span>Paid</span><span class="tnum">${o.tx ? esc(p ? priceOf(p) : '') : money(o.total_cents)}</span></div>
+    <div class="kv" style="font-size:12.5px;margin-top:4px">${paidWith}</div>`));
+}
+
+/* ---------- Chat ---------- */
 function ask(text) { $('msg').value = text; send(); }
+$('msg').addEventListener('input', () => { $('send').disabled = busy || !$('msg').value.trim(); });
+$('composer-form').addEventListener('submit', e => { e.preventDefault(); send(); });
 
 async function send() {
-  const text = $('msg').value.trim(); if (!text) return;
-  $('msg').value = '';
-  bubble('bubble user', esc(text));
+  const text = $('msg').value.trim();
+  if (!text || busy) return;
+  busy = true; $('msg').value = ''; $('send').disabled = true;
+  say('user', text);
+  typing(true);
   const pollTimer = setInterval(pollPending, 3000);
   let gotDone = false;
   try {
-    const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({conversation_id: conv, message: text})});
+    const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: conv, message: text }) });
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
     while (true) {
-      const {done, value} = await reader.read(); if (done) break;
-      buf += dec.decode(value, {stream:true});
+      const { done, value } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
       let i; while ((i = buf.indexOf('\n\n')) >= 0) {
         const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
         const ev = /event: (\S+)/.exec(chunk), dt = /data: (.*)/s.exec(chunk);
         if (!ev || !dt) continue;
         const d = JSON.parse(dt[1]);
-        if (ev[1] === 'text') bubble('bubble bot', esc(d.content));
-        if (ev[1] === 'tool') bubble('sys', `→ ${esc(d.name)} ${esc(d.args || '')}`);
+        if (ev[1] === 'text') say('agent', d.content);
+        if (ev[1] === 'tool') onTool(d);
         if (ev[1] === 'approval_required') showApproval(d);
         if (ev[1] === 'receipt') receipt(d);
-        if (ev[1] === 'error') bubble('sys', 'Error: ' + esc(d.error));
+        if (ev[1] === 'error') activity('Something went wrong: ' + d.error, 'fail');
         if (ev[1] === 'done') gotDone = true;
       }
     }
   } catch (e) {
-    bubble('sys', 'Connection lost');
+    activity('Connection lost', 'fail');
   } finally {
     clearInterval(pollTimer);
+    typing(false);
+    settleActivities();
+    busy = false; $('send').disabled = !$('msg').value.trim();
     // The stream ended without a done event (Safari may drop fetch streams):
     // keep polling pending approvals for up to 60s as a fallback.
     if (!gotDone) {
-      bubble('sys', 'Waiting for approval…');
+      activity('Waiting for your approval…', 'run');
       const t0 = Date.now();
       const t = setInterval(async () => {
         await pollPending();
-        if (currentApprovalId || Date.now() - t0 > 60000) clearInterval(t);
+        if (currentApprovalId || Date.now() - t0 > 60000) { clearInterval(t); settleActivities(); }
       }, 3000);
     }
   }
 }
-$('send').onclick = send;
-$('msg').addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 
-function showApproval(d) {
+/* ---------- Sheets ---------- */
+let openSheetEl = null;
+function openSheet(el) {
+  if (openSheetEl && openSheetEl !== el) openSheetEl.classList.remove('open');
+  openSheetEl = el; el.classList.add('open'); $('scrim').classList.add('open');
+}
+function closeSheet() {
+  if (!openSheetEl) return;
+  openSheetEl.classList.remove('open'); $('scrim').classList.remove('open');
+  if (openSheetEl === $('approve-sheet')) sheetReq = null;
+  openSheetEl = null;
+}
+$('scrim').onclick = closeSheet;
+document.querySelectorAll('[data-close]').forEach(b => b.onclick = closeSheet);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
+
+function showApproval(d, reopen) {
   if (!d || !d.request_id) return;
-  if (currentApprovalId === d.request_id && $('sheet').classList.contains('open')) return;
+  approvals[d.request_id] = d;
+  approvalPanel(d);
+  if (!reopen && currentApprovalId === d.request_id && sheetReq === d.request_id) return;
   currentApprovalId = d.request_id;
   sheetReq = d.request_id;
-  $('sh-amt').textContent = d.rail ? (d.rail === 'mpp' ? '0.01 pathUSD via mpp' : '0.01 USDC via x402') : money(d.amount_cents || 0);
-  $('sh-merchant').textContent = d.merchant || '';
-  $('sh-purpose').textContent = d.purpose || '';
-  $('sh-exp').textContent = d.expires_at ? new Date(d.expires_at).toLocaleTimeString() : '';
-  $('sheet').classList.add('open');
+  const card = defaultCard();
+  const wallet = !!d.rail;
+  const limit = wallet ? (d.rail === 'mpp' ? '0.01 pathUSD' : '0.01 USDC') : money(d.amount_cents || 0);
+  const noCard = !wallet && !card;
+  $('ap-body').innerHTML = `
+    <h2 id="ap-title">${esc(d.agent || AGENT)} is requesting to ${wallet ? 'pay from your wallet' : 'use your card'}</h2>
+    <p class="sub">Approve it once, for this budget only.</p>
+    <div class="table">
+      <div class="kv wrap"><span>Purpose</span><span>${esc(d.purpose || '')}</span></div>
+      <div class="kv"><span>Limit</span><span class="amount tnum">${esc(limit)}</span></div>
+      <div class="kv"><span>Merchant</span><span>${esc(d.merchant || '')}</span></div>
+      ${wallet ? `<div class="kv"><span>Rail</span><span>${esc(d.rail)}</span></div>` : `<div class="kv"><span>Card</span><span>${card ? cardMark(card) + cardName(card) : '<span style="color:var(--muted-fg)">None saved</span>'}</span></div>`}
+      ${d.expires_at ? `<div class="kv"><span>Request expires</span><span>${esc(fmtDate(d.expires_at))}</span></div>` : ''}
+    </div>
+    ${noCard ? `<button class="btn outline" style="margin-top:12px" id="ap-add">${ICON.plus} Add a card</button>` : ''}
+    <div class="note">${ICON.lock}<span>${wallet ? 'The agent never holds your wallet key.' : 'Your card is never shared with the agent.'}</span></div>
+    <button class="btn primary" id="ap-allow" ${noCard ? 'disabled' : ''}>Allow</button>
+    <button class="btn secondary" id="ap-deny">Deny</button>`;
+  $('ap-allow').onclick = () => decide('approve');
+  $('ap-deny').onclick = () => decide('deny');
+  if ($('ap-add')) $('ap-add').onclick = startAddCard;
+  openSheet($('approve-sheet'));
 }
+
 // Fallback path: /api/state.pending_approvals carries the same request id,
 // normalized here into the approval_required event shape.
 async function pollPending() {
   try {
     const s = await (await fetch('/api/state')).json();
+    state = s;
     const p = (s.pending_approvals || [])[0];
     if (p && p.id) {
       const spend = (p.policy && p.policy.spend) || {};
@@ -183,7 +545,7 @@ async function pollPending() {
         amount_cents: spend.per_tx || 0,
         merchant: (wallet ? ((p.policy && p.policy.hosts) || ['']) : (spend.merchants || ['']))[0],
         expires_at: p.expires_at || '',
-        agent: 'Valet Shopping Agent'
+        agent: AGENT
       });
     }
   } catch (e) {}
@@ -192,72 +554,159 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) poll
 window.addEventListener('focus', pollPending);
 
 async function decide(action) {
-  await fetch('/api/approvals/' + sheetReq + '/' + action, {method:'POST'});
-  $('sheet').classList.remove('open');
+  const id = sheetReq;
+  if (!id) return;
+  const allow = $('ap-allow'), deny = $('ap-deny');
+  allow.disabled = deny.disabled = true;
+  (action === 'approve' ? allow : deny).innerHTML = '<span class="spinner" style="border-color:rgba(255,255,255,.4);border-top-color:#fff"></span>';
+  try {
+    const r = await fetch('/api/approvals/' + id + '/' + action, { method: 'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+  } catch (e) {
+    toast('Could not reach Valet — try again');
+    showApproval(approvals[id], true);
+    return;
+  }
+  const approved = action === 'approve';
+  const card = defaultCard();
+  $('ap-body').innerHTML = `<div class="done-state${approved ? '' : ' denied'}">
+    <div class="check">${approved ? ICON.bigcheck : ICON.bigx}</div>
+    <h2>${approved ? 'Approved.' : 'Denied.'}</h2>
+    <p class="sub">${approved ? `${AGENT} can spend this budget once${card ? ' on ' + brandOf(card) + ' •••• ' + esc(card.last4 || '') : ''}. Valet swaps the card in at checkout.` : 'The agent was told no. Nothing was charged.'}</p></div>`;
+  finishApprovalPanel(id, approved);
   currentApprovalId = null;
-  bubble('sys', action === 'approve' ? 'You approved the purchase' : 'You denied the purchase');
+  setTimeout(() => { if (openSheetEl === $('approve-sheet')) closeSheet(); }, 1400);
   pollPending();
 }
-$('sh-allow').onclick = () => decide('approve');
-$('sh-deny').onclick = () => decide('deny');
 
-async function loadWallet() {
-  const s = await (await fetch('/api/state')).json();
-  const b = $('wallet-body');
-  let h = '';
+/* ---------- Wallet ---------- */
+async function refreshState() {
+  try { state = await (await fetch('/api/state')).json(); } catch (e) {}
+  return state;
+}
+async function openWallet() {
+  $('wallet-body').innerHTML = '<div class="empty-row" style="padding:24px 0"><span class="spinner" style="display:inline-block;vertical-align:-2px;margin-right:8px"></span>Loading…</div>';
+  openSheet($('wallet-sheet'));
+  await refreshState();
+  renderWallet();
+}
+$('open-wallet').onclick = openWallet;
+
+function renderWallet() {
+  const s = state;
   const cards = s.cards || [];
-  if (!cards.length) {
-    h += `<div class="card"><div class="t">No card yet</div><div class="big">Add a card to your Valet</div>
-      <div class="muted" style="margin:6px 0">Card data goes to the vault directly — Valet never sees it.</div>
-      <button class="btn primary" id="addcard">Add card</button></div>`;
-  } else {
-    h += `<div class="card"><div class="t">Saved cards</div>` +
-      cards.map(c => `<div class="grant"><span>💳 **** ${esc(c.last4 || '????')} · ${esc(c.label)}
-        <div class="muted">Saved via VGS${c.bin ? ' · ' + esc(c.bin) + '…' : ''}</div></span>
-        <span style="white-space:nowrap">${c.verified ? '<span class="muted" style="color:#5fb878">verified</span> ' : ''}${c.label === s.default_card ? '<span class="muted">default</span>' : `<button class="btn" onclick="setDefault('${esc(c.label)}')">Set default</button>`}
-        <button class="btn danger" onclick="delCard('${esc(c.label)}')">✕</button></span></div>`).join('') +
-      `<button class="btn" id="addcard" style="margin-top:8px">Add card</button></div>`;
-  }
-  h += '<div class="card"><div class="t">Active grants</div>';
+  let h = '<div class="section"><div class="section-title"><span>Cards</span></div><div class="cards">';
+  cards.forEach((c, i) => {
+    const isDef = c.label === s.default_card;
+    h += `<div>
+      <button class="cc c${i % 4}" data-default="${esc(c.label)}" aria-label="Use ${esc(c.label)} for checkout">
+        <div class="top"><span class="label">${esc(c.label)}</span>${isDef ? '<span class="chip-pill">Checkout card</span>' : c.verified ? '<span class="chip-pill">Verified</span>' : ''}</div>
+        <div class="bottom"><span class="pan">•••• ${esc(c.last4 || '····')}</span><span class="brand">${esc(brandOf(c) === 'Card' ? '' : brandOf(c).toUpperCase())}</span></div>
+      </button>
+      <div class="card-actions" style="margin-top:8px">
+        ${isDef ? '' : `<button class="pill-btn" data-default="${esc(c.label)}">Use for checkout</button>`}
+        <button class="pill-btn danger" data-del="${esc(c.label)}">Remove</button>
+      </div></div>`;
+  });
+  h += `</div><button class="btn outline" id="w-add" style="margin-top:${cards.length ? 14 : 0}px">${ICON.plus} Add a card</button>
+    <div class="note" style="margin-bottom:0">${ICON.lock}<span>Saved via VGS. Valet swaps the real number in only on the outbound request.</span></div></div>`;
+
   const grants = (s.grants || []).filter(g => g.active);
-  h += grants.length ? grants.map(g => `<div class="grant"><span>${esc(g.handle)}<div class="muted">${esc(g.id)}</div></span>
-    <button class="btn danger" onclick="revoke('${esc(g.id)}')">Revoke</button></div>`).join('') : '<div class="muted">None</div>';
-  h += '</div><div class="card"><div class="t">Recent activity</div>';
-  h += (s.audit && s.audit.length) ? s.audit.map(e => `<div class="grant"><span class="mono">${esc(e.Edge)} ${esc(e.Decision)}</span><span class="muted">${esc(e.Handle || e.Target || '')}</span></div>`).join('') : '<div class="muted">None</div>';
-  h += '</div><div class="card"><div class="t">Orders</div>';
-  h += (s.orders && s.orders.length) ? s.orders.map(o => {
-    const what = o.tx ? `${esc(o.rail)} <a href="${esc(o.explorer_url || '#')}" style="color:#7dd3fc">${esc(o.tx.slice(0,10))}…</a>` : `****${esc(o.last4)}`;
-    return `<div class="grant"><span>${money(o.total_cents)} ${what}</span><span class="muted">${esc(o.order_id)}</span></div>`;
-  }).join('') : '<div class="muted">None</div>';
-  b.innerHTML = h + '</div>';
-  const btn = $('addcard');
-  if (btn) btn.onclick = async () => {
-    const used = new Set(cards.map(c => c.label));
-    let def = 'personal';
-    if (used.has(def)) { let n = 1; while (used.has(`card-${n}`)) n++; def = `card-${n}`; }
-    const label = prompt('Label for this card', def);
-    if (!label) return; // empty/cancel aborts — no implicit default
-    const res = await fetch('/api/card/capture', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label})});
-    const r = await res.json();
-    if (res.status === 409) { toast(r.error || 'label already in use'); return; }
-    if (r.url) window.location = r.url; else toast(r.error || 'capture failed');
-  };
+  h += '<div class="section"><div class="section-title"><span>Active budgets</span></div><div class="list">';
+  h += grants.length ? grants.map(g => `<div class="row"><div class="grow"><div>${esc(g.handle)}</div><small class="mono">${esc(g.id)}</small></div>
+    <button class="pill-btn danger" data-revoke="${esc(g.id)}">Revoke</button></div>`).join('') : '<div class="empty-row">No live budgets. The agent has to ask you every time.</div>';
+  h += '</div></div>';
+
+  const orders = s.orders || [];
+  h += '<div class="section"><div class="section-title"><span>Orders</span></div><div class="list">';
+  h += orders.length ? orders.slice().reverse().map(o => {
+    const p = (o.items && o.items[0] && catalog[o.items[0].id]) || null;
+    const what = o.tx ? `${esc(o.rail)} · <a href="${esc(o.explorer_url || '#')}" target="_blank" rel="noopener" class="mono">${esc(o.tx.slice(0, 10))}…</a>` : `•••• ${esc(o.last4)}`;
+    return `<div class="row"><span class="tile" style="width:30px;height:30px;font-size:15px">${esc(p ? p.emoji : '🛍️')}</span><div class="grow"><div>${esc(p ? p.name : o.order_id)}</div><small>${what}</small></div><span class="tnum" style="font-weight:600">${o.tx ? esc(p ? priceOf(p) : '') : money(o.total_cents)}</span></div>`;
+  }).join('') : '<div class="empty-row">Nothing bought yet.</div>';
+  h += '</div></div>';
+
+  const audit = s.audit || [];
+  h += '<div class="section"><div class="section-title"><span>Audit log</span><span style="font-weight:400">hash-chained</span></div><div class="list">';
+  h += audit.length ? audit.map(e => {
+    const ok = /allow|approve|ok|grant/i.test(e.Decision || '');
+    return `<div class="row"><span style="color:${ok ? 'var(--success)' : 'var(--muted-fg)'}">${ok ? ICON.check : ICON.x}</span><div class="grow"><div class="mono">${esc(e.Edge)} · ${esc(e.Decision)}</div><small>${esc(e.Handle || e.Target || '')}</small></div></div>`;
+  }).join('') : '<div class="empty-row">No activity yet.</div>';
+  h += '</div></div>';
+  $('wallet-body').innerHTML = h;
+
+  $('w-add').onclick = startAddCard;
+  document.querySelectorAll('#wallet-body [data-default]').forEach(b => b.onclick = () => setDefault(b.dataset.default));
+  document.querySelectorAll('#wallet-body [data-revoke]').forEach(b => b.onclick = () => revoke(b.dataset.revoke));
+  document.querySelectorAll('#wallet-body [data-del]').forEach(b => b.onclick = () => {
+    // Two taps to remove: the first arms the button.
+    if (!b.classList.contains('armed')) { b.classList.add('armed'); b.textContent = 'Tap to remove'; setTimeout(() => { b.classList.remove('armed'); b.textContent = 'Remove'; }, 3000); return; }
+    delCard(b.dataset.del);
+  });
 }
-async function revoke(id) { await fetch('/api/grants/' + id + '/revoke', {method:'POST'}); loadWallet(); toast('Grant revoked'); }
-async function setDefault(label) { await fetch('/api/card/default', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label})}); loadWallet(); }
+
+async function revoke(id) { await fetch('/api/grants/' + id + '/revoke', { method: 'POST' }); await refreshState(); renderWallet(); toast('Budget revoked'); }
+async function setDefault(label) {
+  if (label === state.default_card) return;
+  await fetch('/api/card/default', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label }) });
+  await refreshState(); renderWallet(); toast(`Checkout will use “${label}”`);
+}
 async function delCard(label) {
-  if (!confirm(`Remove card “${label}”?`)) return;
-  await fetch('/api/card/' + encodeURIComponent(label), {method:'DELETE'});
-  loadWallet(); toast('Card removed');
+  await fetch('/api/card/' + encodeURIComponent(label), { method: 'DELETE' });
+  await refreshState(); renderWallet(); toast('Card removed');
 }
 
-$('tab-chat').onclick = () => { $('tab-chat').classList.add('on'); $('tab-wallet').classList.remove('on'); $('chat-view').classList.add('active'); $('wallet-view').classList.remove('active'); };
-$('tab-wallet').onclick = () => { $('tab-wallet').classList.add('on'); $('tab-chat').classList.remove('on'); $('wallet-view').classList.add('active'); $('chat-view').classList.remove('active'); loadWallet(); };
+function startAddCard() {
+  const used = new Set((state.cards || []).map(c => c.label));
+  let def = 'personal';
+  if (used.has(def)) { let n = 1; while (used.has(`card-${n}`)) n++; def = `card-${n}`; }
+  $('add-label').value = def;
+  $('add-hint').textContent = 'Lowercase letters, numbers and dashes.';
+  $('add-hint').classList.remove('err');
+  $('add-go').disabled = false; $('add-go').textContent = 'Continue';
+  openSheet($('add-sheet'));
+  setTimeout(() => $('add-label').select(), 350);
+}
+$('add-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const label = $('add-label').value.trim().toLowerCase();
+  const hint = $('add-hint');
+  if (!/^[a-z0-9-]{1,32}$/.test(label)) { hint.textContent = 'Use 1–32 lowercase letters, numbers or dashes.'; hint.classList.add('err'); return; }
+  $('add-go').disabled = true; $('add-go').innerHTML = '<span class="spinner" style="border-color:rgba(255,255,255,.4);border-top-color:#fff"></span>';
+  const res = await fetch('/api/card/capture', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label }) });
+  const r = await res.json().catch(() => ({}));
+  if (r.url) { window.location = r.url; return; }
+  hint.textContent = res.status === 409 ? (r.error || 'That name is already in use.') : (r.error || 'Could not start card capture.');
+  hint.classList.add('err');
+  $('add-go').disabled = false; $('add-go').textContent = 'Continue';
+});
 
-if (new URLSearchParams(location.search).get('saved')) toast('Card saved');
-loadWallet().then(() => { fetch('/api/state').then(r=>r.json()).then(s => { if (!(s.cards || []).length) $('sub').textContent = '— no card yet'; }); });
-bubble('sys', 'Chat with the shopping agent — payments need your approval.');
-pollPending();
+/* ---------- Boot ---------- */
+async function boot() {
+  try {
+    const p = await (await fetch('/store/products')).json();
+    (p.products || []).forEach(x => catalog[x.id] = x);
+  } catch (e) {}
+  const starters = [
+    ['🛍️', 'What can I buy?'],
+    ['☕', 'Buy the coffee beans'],
+    ['💐', 'Send me some flowers'],
+    catalog.report ? ['📊', 'Buy the market report with crypto'] : ['🎧', 'I need new headphones'],
+  ];
+  $('starters').innerHTML = starters.map(([e, t]) => `<button class="starter" data-ask="${esc(t)}"><span>${e}</span>${esc(t)}</button>`).join('');
+  document.querySelectorAll('[data-ask]').forEach(b => b.onclick = () => ask(b.dataset.ask));
+  await refreshState();
+  if (new URLSearchParams(location.search).get('saved')) {
+    history.replaceState(null, '', location.pathname);
+    toast('Card saved');
+  } else if (!(state.cards || []).length) {
+    $('empty').querySelector('p').insertAdjacentHTML('afterend',
+      `<button class="btn outline" style="margin-top:14px" id="empty-add">${ICON.plus} Add a card to get started</button>`);
+    $('empty-add').onclick = startAddCard;
+  }
+  pollPending();
+}
+boot();
 </script>
 </body>
 </html>

@@ -160,7 +160,7 @@ func (a *app) manifestHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"name": "Valet Shop", "short_name": "Valet Shop",
 		"start_url": "/", "display": "standalone",
-		"background_color": "#0b0d10", "theme_color": "#0b0d10",
+		"background_color": "#ffffff", "theme_color": "#ffffff",
 		"icons": []any{},
 	})
 }

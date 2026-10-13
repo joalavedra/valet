@@ -116,6 +116,8 @@ func summarizeArgs(name string, args map[string]any) string {
 			qty = args["qty"]
 		}
 		return fmt.Sprintf("product=%v qty=%v", args["product_id"], qty)
+	case "buy_with_wallet":
+		return fmt.Sprintf("product=%v rail=%v", args["product_id"], args["rail"])
 	default:
 		return ""
 	}
