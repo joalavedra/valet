@@ -147,6 +147,11 @@
   .btn.secondary:hover { background: var(--muted-strong); }
   .btn.outline { border: 1px solid var(--border); height: 46px; font-size: 15px; }
   .btn.outline:hover { background: var(--muted); }
+  .picker { position: relative; display: flex; align-items: center; gap: 10px; height: 50px; border: 1px solid var(--border); border-radius: 12px; padding: 0 14px; transition: border-color .15s, box-shadow .15s; }
+  .picker:focus-within { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(69,100,255,.15); }
+  .picker-face { flex: 1; display: flex; align-items: center; gap: 8px; font-size: 15px; min-width: 0; }
+  .picker-face em { font-style: normal; color: var(--muted-fg); font-size: 13px; text-transform: capitalize; margin-left: auto; padding-right: 6px; }
+  .picker select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; font-size: 16px; }
   .done-state { display: flex; flex-direction: column; gap: 14px; padding: 18px 0 30px; }
   .done-state .check { width: 60px; height: 60px; border-radius: 999px; background: var(--primary); display: grid; place-items: center; animation: pop .45s cubic-bezier(.34,1.56,.64,1); }
   .done-state.denied .check { background: var(--muted-strong); }
@@ -311,6 +316,10 @@ function cardMark(c) {
   return '';
 }
 function cardName(c) { return c ? `${brandOf(c)} •••• ${esc(c.last4 || '····')}` : ''; }
+function chosenCard(id) {
+  const d = approvals[id];
+  return (d && (state.cards || []).find(c => c.label === d.card)) || defaultCard();
+}
 function defaultCard() { return (state.cards || []).find(c => c.label === state.default_card) || (state.cards || [])[0]; }
 function productFromArgs(args) {
   const m = /product=([\w-]+)/.exec(args || '');
@@ -431,7 +440,7 @@ function approvalPanel(d) {
   if (approvalPanels[d.request_id]) return approvalPanels[d.request_id];
   const card = defaultCard();
   const limit = d.rail ? (d.rail === 'mpp' ? '0.01 pathUSD' : '0.01 USDC') : money(d.amount_cents || 0);
-  const how = d.rail ? `<span>Rail</span><span>${esc(d.rail)}</span>` : `<span>Card</span><span>${cardMark(card)}${cardName(card)}</span>`;
+  const how = d.rail ? `<span>Rail</span><span>${esc(d.rail)}</span>` : `<span>Card</span><span data-card>${cardMark(card)}${cardName(card)}</span>`;
   const el = node('panel', `
     <div class="panel-head"><span class="panel-title">${esc(lastProduct ? lastProduct.name : 'Purchase')}</span><span class="badge" data-badge>Waiting for you</span></div>
     <div class="kv"><span>Limit</span><span class="tnum">${esc(limit)}</span></div>
@@ -449,6 +458,8 @@ function finishApprovalPanel(id, approved) {
   const b = el.querySelector('[data-badge]');
   b.textContent = approved ? 'Approved' : 'Denied';
   b.className = 'badge ' + (approved ? 'ok' : 'no');
+  const c = chosenCard(id), row = el.querySelector('[data-card]');
+  if (row && c) row.innerHTML = cardMark(c) + cardName(c);
 }
 
 function receipt(o) {
@@ -546,15 +557,19 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet()
 
 function showApproval(d, reopen) {
   if (!d || !d.request_id) return;
+  const prev = approvals[d.request_id];
+  if (prev && prev !== d && prev.card && !d.card) d.card = prev.card; // keep the owner's pick across polls
   approvals[d.request_id] = d;
   approvalPanel(d);
   if (!reopen && currentApprovalId === d.request_id && sheetReq === d.request_id) return;
   currentApprovalId = d.request_id;
   sheetReq = d.request_id;
-  const card = defaultCard();
+  const card = chosenCard(d.request_id);
+  const cards = state.cards || [];
   const wallet = !!d.rail;
   const limit = wallet ? (d.rail === 'mpp' ? '0.01 pathUSD' : '0.01 USDC') : money(d.amount_cents || 0);
   const noCard = !wallet && !card;
+  const pick = !wallet && cards.length > 1;
   $('ap-body').innerHTML = `
     <h2 id="ap-title">${esc(d.agent || AGENT)} is requesting to ${wallet ? 'pay from your wallet' : 'use your card'}</h2>
     <p class="sub">Approve it once, for this budget only.</p>
@@ -562,9 +577,13 @@ function showApproval(d, reopen) {
       <div class="kv wrap"><span>Purpose</span><span>${esc(d.purpose || '')}</span></div>
       <div class="kv"><span>Limit</span><span class="amount tnum">${esc(limit)}</span></div>
       <div class="kv"><span>Merchant</span><span>${esc(d.merchant || '')}</span></div>
-      ${wallet ? `<div class="kv"><span>Rail</span><span>${esc(d.rail)}</span></div>` : `<div class="kv"><span>Card</span><span>${card ? cardMark(card) + cardName(card) : '<span style="color:var(--muted-fg)">None saved</span>'}</span></div>`}
+      ${wallet ? `<div class="kv"><span>Rail</span><span>${esc(d.rail)}</span></div>` : pick ? '' : `<div class="kv"><span>Card</span><span>${card ? cardMark(card) + cardName(card) : '<span style="color:var(--muted-fg)">None saved</span>'}</span></div>`}
       ${d.expires_at ? `<div class="kv"><span>Request expires</span><span>${esc(fmtDate(d.expires_at))}</span></div>` : ''}
     </div>
+    ${pick ? `<div class="field" style="margin-top:16px"><label for="ap-card">Choose card</label>
+      <div class="picker"><span class="picker-face" id="ap-card-face">${cardMark(card)}<span>${cardName(card)}</span><em>${esc(card.label)}</em></span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 15 5 5 5-5M7 9l5-5 5 5"/></svg>
+        <select id="ap-card">${cards.map(c => `<option value="${esc(c.label)}"${c.label === card.label ? ' selected' : ''}>${brandOf(c)} •••• ${esc(c.last4 || '')} (${esc(c.label)})</option>`).join('')}</select></div></div>` : ''}
     ${noCard ? `<button class="btn outline" style="margin-top:12px" id="ap-add">${ICON.plus} Add a card</button>` : ''}
     <div class="note">${ICON.lock}<span>${wallet ? 'The agent never holds your wallet key.' : 'Your card is never shared with the agent.'}</span></div>
     <button class="btn primary" id="ap-allow" ${noCard ? 'disabled' : ''}>Allow</button>
@@ -572,6 +591,11 @@ function showApproval(d, reopen) {
   $('ap-allow').onclick = () => decide('approve');
   $('ap-deny').onclick = () => decide('deny');
   if ($('ap-add')) $('ap-add').onclick = startAddCard;
+  if ($('ap-card')) $('ap-card').onchange = e => {
+    d.card = e.target.value;
+    const c = chosenCard(d.request_id);
+    $('ap-card-face').innerHTML = `${cardMark(c)}<span>${cardName(c)}</span><em>${esc(c.label)}</em>`;
+  };
   openSheet($('approve-sheet'));
 }
 
@@ -606,7 +630,9 @@ async function decide(action) {
   allow.disabled = deny.disabled = true;
   (action === 'approve' ? allow : deny).innerHTML = '<span class="spinner" style="border-color:rgba(255,255,255,.4);border-top-color:#fff"></span>';
   try {
-    const r = await fetch('/api/approvals/' + id + '/' + action, { method: 'POST' });
+    const d = approvals[id] || {};
+    const body = action === 'approve' && !d.rail && chosenCard(id) ? JSON.stringify({ card: chosenCard(id).label }) : '{}';
+    const r = await fetch('/api/approvals/' + id + '/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
     if (!r.ok) throw new Error('HTTP ' + r.status);
   } catch (e) {
     toast('Could not reach Valet — try again');
@@ -614,7 +640,7 @@ async function decide(action) {
     return;
   }
   const approved = action === 'approve';
-  const card = defaultCard();
+  const card = chosenCard(id);
   $('ap-body').innerHTML = `<div class="done-state${approved ? '' : ' denied'}">
     <div class="check">${approved ? ICON.bigcheck : ICON.bigx}</div>
     <h2>${approved ? 'Approved.' : 'Denied.'}</h2>

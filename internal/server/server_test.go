@@ -575,7 +575,7 @@ func TestHTTPCallEndToEnd(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("mismatch: %d", rec.Code)
 	}
-	entries, _ := st.ListAudit(10)
+	entries, _ := st.ListAuditRecent(20)
 	denySeen := false
 	for _, e := range entries {
 		if e.Edge == "http" && e.Decision == "deny" && strings.Contains(e.Detail, "service_mismatch") {
@@ -1111,6 +1111,63 @@ func TestCardGrantRequiresApproval(t *testing.T) {
 	code, _ = doJSON(t, srv, "POST", "/v1/owner/grants/"+gid+"/revoke", own, nil)
 	if code != 404 {
 		t.Fatalf("re-revoke: want 404, got %d", code)
+	}
+}
+
+func TestApproveWithDifferentCard(t *testing.T) {
+	srv, st, dek, tok, own := approvalServer(t, "card")
+	asked := addCard(t, st, srv, dek, "amex")
+	chosen := addCard(t, st, srv, dek, "work")
+	request := func() string {
+		t.Helper()
+		code, out := doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": asked, "purpose": "coffee"})
+		if code != 202 {
+			t.Fatalf("want 202, got %d %v", code, out)
+		}
+		return out["request_id"].(string)
+	}
+
+	// Refused: not a card, unknown card. The request stays pending.
+	rid := request()
+	code, _ := doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, map[string]any{"handle": "login://github.com/me"})
+	if code != 400 {
+		t.Fatalf("non-card override: want 400, got %d", code)
+	}
+	code, _ = doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, map[string]any{"handle": "card://nope"})
+	if code != 404 {
+		t.Fatalf("unknown card: want 404, got %d", code)
+	}
+
+	// Approved with the other card: the grant is for that card.
+	code, out := doJSON(t, srv, "POST", "/v1/owner/approvals/"+rid+"/approve", own, map[string]any{"handle": chosen})
+	if code != 200 || out["handle"] != chosen {
+		t.Fatalf("approve with %s: %d %v", chosen, code, out)
+	}
+	_, out = doJSON(t, srv, "GET", "/v1/grants/requests/"+rid, tok, nil)
+	g, err := srv.issuer.Verify(out["token"].(string), 1)
+	if err != nil || g.Handle != chosen {
+		t.Fatalf("grant handle: want %s, got %+v (%v)", chosen, g, err)
+	}
+	entries, _ := st.ListAuditRecent(20)
+	found := false
+	for _, e := range entries {
+		if e.Decision == "granted" && e.Handle == chosen && strings.Contains(e.Detail, `"requested_handle":"`+asked+`"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("audit should record the swap: %+v", entries)
+	}
+
+	// A non-card request can't be approved with a card.
+	addWalletCred(t, srv, st)
+	code, out = doJSON(t, srv, "POST", "/v1/grants", tok, map[string]any{"handle": "wallet://agent", "policy": map[string]any{"hosts": []string{"x.example"}, "require_human": true}})
+	if code != 202 {
+		t.Fatalf("wallet request: want 202, got %d %v", code, out)
+	}
+	code, _ = doJSON(t, srv, "POST", "/v1/owner/approvals/"+out["request_id"].(string)+"/approve", own, map[string]any{"handle": chosen})
+	if code != 400 {
+		t.Fatalf("wallet→card override: want 400, got %d", code)
 	}
 }
 

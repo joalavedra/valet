@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -1807,11 +1808,38 @@ func (s *Server) ownerApprove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "not pending"})
 		return
 	}
+	// The owner may approve with a different card than the agent asked for
+	// (same policy, same budget). Only card-for-card: swapping a login or a
+	// wallet would change what the grant can reach, not just how it pays.
+	var body struct {
+		Handle string `json:"handle"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
+			return
+		}
+	}
+	issueHandle := ap.Handle
+	if body.Handle != "" && body.Handle != ap.Handle {
+		reqKind, _, _, _ := handle.Parse(ap.Handle)
+		newKind, _, _, err := handle.Parse(body.Handle)
+		if err != nil || reqKind != "card" || newKind != "card" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "only a card request can be approved with a different card"})
+			return
+		}
+		c, err := s.st.GetCredential(body.Handle)
+		if err != nil || c.Type != "card" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown handle"})
+			return
+		}
+		issueHandle = c.Handle
+	}
 	ttl := ap.TTL
 	if ttl <= 0 {
 		ttl = 15 * time.Minute
 	}
-	token, g, err := s.issuer.Issue(ap.AgentID, ap.Handle, ap.Policy, ttl, ap.MaxUses)
+	token, g, err := s.issuer.Issue(ap.AgentID, issueHandle, ap.Policy, ttl, ap.MaxUses)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1827,10 +1855,14 @@ func (s *Server) ownerApprove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "not pending"})
 		return
 	}
-	detail, _ := json.Marshal(map[string]string{"request_id": id, "grant_id": g.ID, "via": "owner"})
-	_ = s.chain.Append(&store.AuditEntry{AgentID: ap.AgentID, Handle: ap.Handle, Edge: "control", Target: "grant", Decision: "granted", Detail: string(detail)})
+	d := map[string]string{"request_id": id, "grant_id": g.ID, "via": "owner"}
+	if issueHandle != ap.Handle {
+		d["requested_handle"] = ap.Handle
+	}
+	detail, _ := json.Marshal(d)
+	_ = s.chain.Append(&store.AuditEntry{AgentID: ap.AgentID, Handle: issueHandle, Edge: "control", Target: "grant", Decision: "granted", Detail: string(detail)})
 	s.signalWaiters(id)
-	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "grant_id": g.ID, "expires_at": g.ExpiresAt})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "grant_id": g.ID, "handle": issueHandle, "expires_at": g.ExpiresAt})
 }
 
 func (s *Server) ownerDeny(w http.ResponseWriter, r *http.Request) {

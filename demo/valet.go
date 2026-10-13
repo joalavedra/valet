@@ -131,8 +131,12 @@ func (v *valetClient) ownerDelete(ctx context.Context, path string) (map[string]
 }
 
 func (v *valetClient) ownerAction(ctx context.Context, path string) (map[string]any, error) {
+	return v.ownerActionBody(ctx, path, nil)
+}
+
+func (v *valetClient) ownerActionBody(ctx context.Context, path string, body any) (map[string]any, error) {
 	var out map[string]any
-	err := v.call(ctx, v.ownerToken, "POST", path, nil, &out)
+	err := v.call(ctx, v.ownerToken, "POST", path, body, &out)
 	return out, err
 }
 

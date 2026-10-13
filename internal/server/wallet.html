@@ -30,6 +30,7 @@
   .actions button { flex:1; }
   dl { display:grid; grid-template-columns:110px 1fr; row-gap:8px; column-gap:12px; margin:14px 0 0; }
   dt { color:var(--muted); font-size:13px; } dd { margin:0; font-weight:600; }
+  .card-pick { font:inherit; font-weight:600; padding:6px 8px; border-radius:8px; border:1px solid var(--border, #ddd); background:transparent; color:inherit; max-width:100%; }
   .approve { max-width:440px; margin:40px auto; }
   .approve .card { padding:24px; }
   .approve h3 { margin:0 0 4px; font-size:18px; }
@@ -130,7 +131,15 @@
     h += '<dl>';
     if (a.purpose) h += '<dt>Purpose</dt><dd>' + esc(a.purpose) + '</dd>';
     pol.forEach(function (kv) { h += '<dt>' + esc(kv[0]) + '</dt><dd>' + esc(kv[1]) + '</dd>'; });
-    h += '<dt>' + (a.type === 'card' ? 'Card' : 'Credential') + '</dt><dd>' + esc(handleLabel(a)) + '</dd>';
+    // A pending card request can be approved with any saved card.
+    var cards = ((opts && opts.handles) || []).filter(function (x) { return (x.type || '').indexOf('card') === 0; });
+    if (a.type === 'card' && a.status === 'pending' && cards.length > 1) {
+      h += '<dt>Card</dt><dd><select class="card-pick" aria-label="Card to approve with">' + cards.map(function (c) {
+        return '<option value="' + esc(c.handle) + '"' + (c.handle === a.handle ? ' selected' : '') + '>' + esc(handleLabel(c)) + (c.label ? ' (' + esc(c.label) + ')' : '') + '</option>';
+      }).join('') + '</select></dd>';
+    } else {
+      h += '<dt>' + (a.type === 'card' ? 'Card' : 'Credential') + '</dt><dd>' + esc(handleLabel(a)) + '</dd>';
+    }
     if (exp) h += '<dt>Expires</dt><dd>' + esc(exp.toLocaleString()) + '</dd>';
     h += '</dl>';
     if (a.status === 'pending') {
@@ -145,7 +154,9 @@
       var allow = el.querySelector('.allow'), deny = el.querySelector('.deny');
       function go(action) {
         [allow, deny].forEach(function (b) { if (b) b.disabled = true; });
-        api('POST', '/v1/owner/approvals/' + encodeURIComponent(id) + '/' + action).then(function (r) { after(id, r); }).catch(function (e) { fail(e); [allow, deny].forEach(function (b) { if (b) b.disabled = false; }); });
+        var pick = el.querySelector('.card-pick');
+        var body = action === 'approve' && pick ? { handle: pick.value } : undefined;
+        api('POST', '/v1/owner/approvals/' + encodeURIComponent(id) + '/' + action, body).then(function (r) { after(id, r); }).catch(function (e) { fail(e); [allow, deny].forEach(function (b) { if (b) b.disabled = false; }); });
       }
       if (allow) allow.onclick = function () { go('approve'); };
       if (deny) deny.onclick = function () { go('deny'); };
@@ -165,11 +176,12 @@
     show('approve');
     var root = $('approveView');
     root.innerHTML = '<div class="card"><p class="muted">Loading…</p></div>';
-    api('GET', '/v1/owner/approvals').then(function (j) {
+    Promise.all([api('GET', '/v1/owner/approvals'), api('GET', '/v1/owner/handles')]).then(function (res) {
+      var j = res[0], handles = res[1].handles || [];
       var a = (j.approvals || []).filter(function (x) { return x.id === approveId; })[0];
       if (!a) { root.innerHTML = '<div class="card"><h3>Request not found</h3><p class="muted">It may have expired.</p></div>'; return; }
       if (a.status !== 'pending') { root.innerHTML = decided(a, a.status); return; }
-      root.innerHTML = approvalCard(a, { big: true });
+      root.innerHTML = approvalCard(a, { big: true, handles: handles });
       bindDecisions(root, function (id, r) { a.status = r.status; a.grant_expires_at = r.expires_at; root.innerHTML = decided(a, r.status); });
     }).catch(fail);
   }
@@ -179,7 +191,7 @@
     Promise.all([api('GET', '/v1/owner/approvals?status=pending'), api('GET', '/v1/owner/handles'), api('GET', '/v1/owner/grants'), api('GET', '/v1/owner/audit')]).then(function (res) {
       var pend = res[0].approvals || [], handles = res[1].handles || [], grants = (res[2].grants || []).filter(function (g) { return g.active; }), audit = (res[3].audit || []).slice(0, 15);
       var p = $('pending');
-      p.innerHTML = pend.length ? pend.map(function (a) { return approvalCard(a); }).join('') : '<div class="empty">Nothing waiting for you.</div>';
+      p.innerHTML = pend.length ? pend.map(function (a) { return approvalCard(a, { handles: handles }); }).join('') : '<div class="empty">Nothing waiting for you.</div>';
       bindDecisions(p, function () { renderWallet(); });
       $('handles').innerHTML = handles.length ? handles.map(function (h) {
         return '<div class="card"><div class="row"><span class="v">' + esc(handleLabel(h)) + '</span>' + pill(h.type) + '</div><div class="mono muted">' + esc(h.handle) + '</div></div>';

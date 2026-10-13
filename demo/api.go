@@ -239,7 +239,20 @@ func (a *app) deleteCardHandler(w http.ResponseWriter, r *http.Request) {
 func (a *app) decisionHandler(action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		out, err := a.valet.ownerAction(r.Context(), "/v1/owner/approvals/"+id+"/"+action)
+		// Approve may name a different saved card than the agent asked for.
+		var req struct {
+			Card string `json:"card"`
+		}
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req)
+		var body any
+		if action == "approve" && req.Card != "" {
+			if !cardLabelRE.MatchString(req.Card) {
+				writeJSON(w, 400, map[string]string{"error": "bad card label"})
+				return
+			}
+			body = map[string]string{"handle": "card://" + req.Card}
+		}
+		out, err := a.valet.ownerActionBody(r.Context(), "/v1/owner/approvals/"+id+"/"+action, body)
 		if err != nil {
 			writeJSON(w, 502, map[string]string{"error": err.Error()})
 			return
