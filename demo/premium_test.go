@@ -104,6 +104,27 @@ func TestAgentWalletBuyPaid(t *testing.T) {
 	if len(a.orders) != 1 || a.orders[0].Rail != "x402" || a.orders[0].ExplorerURL == "" {
 		t.Fatalf("order not recorded: %+v", a.orders)
 	}
+	// Progress streams each stage, and every stage it opens it closes.
+	var final []string
+	last := map[string]string{}
+	for _, e := range events {
+		if e["ev"] != "step" {
+			continue
+		}
+		d := e["d"].(map[string]string)
+		if _, seen := last[d["id"]]; !seen {
+			final = append(final, d["id"])
+		}
+		last[d["id"]] = d["status"]
+	}
+	if strings.Join(final, ",") != "budget,pay,order" {
+		t.Fatalf("want stages budget,pay,order, got %v", final)
+	}
+	for id, st := range last {
+		if st != "ok" {
+			t.Fatalf("stage %s ended %q, want ok", id, st)
+		}
+	}
 }
 
 func TestAgentWalletBuyDeclined(t *testing.T) {
@@ -114,9 +135,17 @@ func TestAgentWalletBuyDeclined(t *testing.T) {
 	a.cfg.PublicURL = "https://demo.example"
 	a.store = newDemoStore("0xabc")
 	a.valet = newValetClient(srv.URL, "agent", "owner")
-	res := a.agentWalletBuy(context.Background(), "conv1", "report", "x402", func(string, any) {})
+	var payStatus string
+	res := a.agentWalletBuy(context.Background(), "conv1", "report", "x402", func(ev string, d any) {
+		if m, ok := d.(map[string]string); ok && ev == "step" && m["id"] == "pay" {
+			payStatus = m["status"]
+		}
+	})
 	if res["status"] != "declined" {
 		t.Fatalf("want declined, got %v", res)
+	}
+	if payStatus != "fail" {
+		t.Fatalf("pay stage should end failed on decline, got %q", payStatus)
 	}
 	if len(a.orders) != 0 {
 		t.Fatalf("order recorded on decline: %+v", a.orders)
