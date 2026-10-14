@@ -281,9 +281,11 @@ let catalog = {};             // product id → product
 let busy = false;
 let sheetReq = null;          // request id shown in the approval sheet
 let currentApprovalId = null;
+let dismissedApproval = null; // request id the owner closed — don't reopen via polls
 const approvalPanels = {};    // request id → in-thread panel
 const approvals = {};         // request id → last approval_required payload
 let lastProduct = null;       // the product the agent is buying, for the receipt
+let pendingPoll = null;       // fallback poll after a dropped chat stream
 
 /* ---------- Passkeys (WebAuthn) ----------
    Valet hands out options as JSON with base64url buffers; the browser API
@@ -577,9 +579,9 @@ async function send() {
     if (!gotDone) {
       activity('Waiting for your approval…', 'run');
       const t0 = Date.now();
-      const t = setInterval(async () => {
+      pendingPoll = setInterval(async () => {
         await pollPending();
-        if (currentApprovalId || Date.now() - t0 > 60000) { clearInterval(t); settleActivities(); }
+        if (currentApprovalId || Date.now() - t0 > 60000) { clearInterval(pendingPoll); pendingPoll = null; settleActivities(); }
       }, 3000);
     }
   }
@@ -594,7 +596,7 @@ function openSheet(el) {
 function closeSheet() {
   if (!openSheetEl) return;
   openSheetEl.classList.remove('open'); $('scrim').classList.remove('open');
-  if (openSheetEl === $('approve-sheet')) sheetReq = null;
+  if (openSheetEl === $('approve-sheet')) { dismissedApproval = sheetReq; sheetReq = null; }
   openSheetEl = null;
 }
 $('scrim').onclick = closeSheet;
@@ -607,6 +609,8 @@ function showApproval(d, reopen) {
   if (prev && prev !== d && prev.card && !d.card) d.card = prev.card; // keep the owner's pick across polls
   approvals[d.request_id] = d;
   approvalPanel(d);
+  if (reopen || (dismissedApproval && dismissedApproval !== d.request_id)) dismissedApproval = null;
+  if (!reopen && dismissedApproval === d.request_id) return;
   if (!reopen && currentApprovalId === d.request_id && sheetReq === d.request_id) return;
   currentApprovalId = d.request_id;
   sheetReq = d.request_id;
@@ -638,7 +642,10 @@ function showApproval(d, reopen) {
   $('ap-deny').onclick = () => decide('deny');
   if ($('ap-add')) $('ap-add').onclick = startAddCard;
   if ($('ap-card')) $('ap-card').onchange = e => {
-    d.card = e.target.value;
+    // Write on the live record too — the next poll replaces
+    // approvals[id] and would otherwise drop this pick.
+    const cur = approvals[d.request_id] || d;
+    cur.card = e.target.value; d.card = cur.card;
     const c = chosenCard(d.request_id);
     $('ap-card-face').innerHTML = `${cardMark(c)}<span>${cardName(c)}</span><em>${esc(c.label)}</em>`;
   };
@@ -695,6 +702,18 @@ async function decide(action) {
     toast(e.name === 'NotAllowedError' ? 'Passkey cancelled' : e.status === 403 ? 'Passkey check failed — try again' : 'Could not reach Valet — try again');
     showApproval(approvals[id], true);
     return;
+  }
+  // Reflect the decision on the live checkout card even if the SSE
+  // stream already died — avoid a second panel by updating the row.
+  if (checkout) {
+    const row = checkout.rows['budget'];
+    if (action === 'deny') {
+      if (row) { setActivity(row, 'You denied the budget', 'fail'); stopCheckout(); }
+      else onStep({id: 'budget', label: 'You denied the budget', status: 'fail'});
+    } else if (row) { setActivity(row, 'Budget approved', 'ok'); }
+    else onStep({id: 'budget', label: 'Budget approved', status: 'ok'});
+    if (pendingPoll) { clearInterval(pendingPoll); pendingPoll = null; }
+    settleActivities();
   }
   const approved = action === 'approve';
   const card = chosenCard(id);

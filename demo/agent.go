@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,32 @@ type chatAgent struct {
 
 func newChatAgent(a *app) *chatAgent { return &chatAgent{app: a} }
 
+// ssePingInterval is the SSE heartbeat period. During the long approval
+// wait nothing else is written, and tunnels drop streams after ~100s
+// idle — a comment line keeps it alive. Tests shrink it.
+var ssePingInterval = 15 * time.Second
+
+// sseWriter serializes writes to the SSE stream so the ping goroutine
+// and event emits never interleave mid-frame.
+type sseWriter struct {
+	w  http.ResponseWriter
+	fl http.Flusher
+	mu *sync.Mutex
+}
+
+func (s *sseWriter) event(ev string, data any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	emitJSON(s.w, s.fl, ev, data)
+}
+
+func (s *sseWriter) ping() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fmt.Fprint(s.w, ": ping\n\n")
+	s.fl.Flush()
+}
+
 // chatHandler streams SSE: text/tool/approval_required/receipt/error/done.
 func (a *app) chatHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -57,7 +84,8 @@ func (a *app) chatHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": "no streaming"})
 		return
 	}
-	emit := func(ev string, data any) { emitJSON(w, flusher, ev, data) }
+	sw := &sseWriter{w: w, fl: flusher, mu: &sync.Mutex{}}
+	emit := sseEmit(sw.event)
 
 	a.mu.Lock()
 	history := append([]geminiContent{}, a.convs[req.ConversationID]...)
@@ -66,6 +94,19 @@ func (a *app) chatHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Minute)
 	defer cancel()
+
+	go func() {
+		t := time.NewTicker(ssePingInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				sw.ping()
+			}
+		}
+	}()
 
 	for round := 0; round < 8; round++ {
 		content, err := a.gemini.generate(ctx, &geminiRequest{
