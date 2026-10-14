@@ -353,6 +353,29 @@ For the Tempo Moderato testnet (chain 42431), fund the wallet with
 pathUSD `0x20c0000000000000000000000000000000000000` via the
 `tempo_fundAddress` RPC method on the Moderato RPC.
 
+## Issuer rail
+
+An `issuer://` handle points at a configured card-issuer driver; a grant
+on it mints **exactly one card** — merchant-locked, per-tx and lifetime
+capped, expiring with the grant — which the card edge reveals only at
+fill time and sends directly to the merchant (no VGS proxy, still behind
+the SSRF fence). The card is bound to the grant: revoke, expiry,
+max_uses exhaustion, or reaching the spend total closes it at the issuer
+(plus a periodic sweeper for stragglers). Valet stores only display
+metadata (brand, last4, expiry) — never PAN or CVC.
+
+```bash
+valet cred add --type issuer --label personal --driver mock
+```
+
+Drivers: `mock` today (in-memory Luhn test PANs, for tests and demos);
+`lithic`/`link` next. New drivers implement `internal/edge/issuer`'s
+`Issuer` interface (`Issue`/`Reveal`/`Close` + `Caps`) and register like
+card providers. `pay`/`request_grant` work on `issuer://` handles
+unchanged; `VALET_REQUIRE_APPROVAL=issuer` routes mints through the
+owner approval flow. Minted cards show up under
+`GET /v1/owner/cards`.
+
 ## Human approvals & wallet
 
 Grant requests can require a human decision before a token is issued. An
@@ -418,6 +441,8 @@ Owner API (bearer = master password or `VALET_OWNER_TOKEN`):
 - `GET /v1/owner/grants` — all grants with `active` flag
 - `POST /v1/owner/grants/{id}/revoke` — revoke (edge calls then get `403 grant revoked`)
 - `GET /v1/owner/audit` — alias of `GET /v1/audit`
+- `GET /v1/owner/cards` — issuer-minted cards (driver, brand, last4, expiry, status)
+- `POST /v1/owner/cards/{id}/close` — close the card and revoke its grant
 
 MCP: `request_grant` accepts `purpose` and `wait`; `wait_grant(request_id,
 wait)` long-polls for the decision.

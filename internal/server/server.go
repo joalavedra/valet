@@ -33,6 +33,7 @@ import (
 	"github.com/joalavedra/valet/internal/edge/browser"
 	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
+	issuergedg "github.com/joalavedra/valet/internal/edge/issuer"
 	"github.com/joalavedra/valet/internal/edge/wallet"
 	mppedg "github.com/joalavedra/valet/internal/edge/wallet/mpp"
 	"github.com/joalavedra/valet/internal/edge/wallet/openfort"
@@ -58,6 +59,8 @@ type Server struct {
 	cardProv   card.Provider
 	mux        *http.ServeMux
 
+	sweepCtx  context.Context
+	sweepStop context.CancelFunc
 	// allowPrivate lets wallet edges dial non-publicly-routable upstreams
 	// (VALET_ALLOW_PRIVATE_UPSTREAMS=1); default is the SSRF hard fence.
 	allowPrivate bool
@@ -151,6 +154,8 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 	s.mux.HandleFunc("POST /v1/owner/grants/{id}/revoke", s.ownerAuth(s.ownerRevoke))
 	s.mux.HandleFunc("GET /v1/owner/audit", s.ownerAuth(s.listAudit))
 	s.mux.HandleFunc("POST /v1/owner/captures", s.ownerAuth(s.ownerCaptures))
+	s.mux.HandleFunc("GET /v1/owner/cards", s.ownerAuth(s.ownerCards))
+	s.mux.HandleFunc("POST /v1/owner/cards/{id}/close", s.ownerAuth(s.ownerCardClose))
 	s.mux.HandleFunc("GET /v1/owner/passkeys", s.ownerAuth(s.ownerPasskeys))
 	s.mux.HandleFunc("POST /v1/owner/passkeys/challenge", s.ownerAuth(s.ownerPasskeyChallenge))
 	s.mux.HandleFunc("POST /v1/owner/passkeys/register/begin", s.ownerAuth(s.ownerPasskeyRegisterBegin))
@@ -160,6 +165,20 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 	s.mux.HandleFunc("POST /capture/{token}/complete", s.captureComplete)
 	s.mux.HandleFunc("GET /wallet", s.walletPage)
 	s.mux.HandleFunc("GET /approve/{id}", s.walletPage)
+
+	s.sweepCtx, s.sweepStop = context.WithCancel(context.Background())
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-s.sweepCtx.Done():
+				return
+			case <-t.C:
+				s.sweepIssuedCards()
+			}
+		}
+	}()
 	return s
 }
 
@@ -732,6 +751,12 @@ func (s *Server) createGrant(w http.ResponseWriter, r *http.Request, a *store.Ag
 	token, g, err := s.issuer.Issue(a.ID, cred.Handle, string(pj), ttl, req.MaxUses)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := s.mintIssuedCard(g, cred, req.Purpose); err != nil {
+		_ = s.st.RevokeGrant(g.ID)
+		slog.Debug("issuer card mint failed", "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card issue failed"})
 		return
 	}
 	_ = s.chain.Append(&store.AuditEntry{AgentID: a.ID, Handle: cred.Handle, Edge: "control", Target: "grant", Decision: "granted", Detail: "{}"})
@@ -1391,7 +1416,7 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		return
 	}
 	kind, _, _, err := handle.Parse(g.Handle)
-	if err != nil || kind != "card" {
+	if err != nil || (kind != "card" && kind != "issuer") {
 		s.auditDeny(a.ID, g.Handle, "card", "", "not_card_handle")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant is not for a card handle"})
 		return
@@ -1430,36 +1455,72 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": d.Reason})
 		return
 	}
-	cred, err := s.st.GetCredential(g.Handle)
-	if err != nil {
-		s.auditDeny(a.ID, g.Handle, "card", merchant, "credential_error")
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown handle"})
-		return
-	}
-	fields, err := s.credValues(cred)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "credential decrypt failed"})
-		return
+	var fields map[string]string
+	var prov card.Provider
+	if kind == "issuer" {
+		// Issuer grants fill from the minted card's Reveal, then send
+		// straight to the merchant (no VGS proxy, still netguard-fenced).
+		ic, ierr := s.st.GetIssuedCardByGrant(g.ID)
+		if ierr != nil || ic.Status != "active" {
+			s.auditDeny(a.ID, g.Handle, "card", merchant, "card_not_active")
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "card_not_active"})
+			return
+		}
+		drv, derr := s.cardIssuer(ic.Driver)
+		if derr != nil {
+			slog.Debug("issuer driver unavailable", "error", derr)
+			s.auditDeny(a.ID, g.Handle, "card", merchant, "provider_error")
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pay failed"})
+			return
+		}
+		f, rerr := drv.Reveal(r.Context(), ic.CardID)
+		if rerr != nil {
+			slog.Debug("issuer reveal failed", "error", rerr)
+			s.auditDeny(a.ID, g.Handle, "card", merchant, "card_not_active")
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "card_not_active"})
+			return
+		}
+		defer f.Zero()
+		fields = map[string]string{
+			"number": f.Number, "exp_month": f.ExpMonth, "exp_year": f.ExpYear,
+			"cvc": f.CVC, "holder": f.Holder,
+		}
+		prov = s.cardProv // test seam; default is the fenced direct transport
+		if prov == nil {
+			prov = issuergedg.DirectProvider(s.allowPrivate)
+		}
+	} else {
+		cred, err := s.st.GetCredential(g.Handle)
+		if err != nil {
+			s.auditDeny(a.ID, g.Handle, "card", merchant, "credential_error")
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown handle"})
+			return
+		}
+		fields, err = s.credValues(cred)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "credential decrypt failed"})
+			return
+		}
+		provName := "vgs"
+		var meta struct {
+			Provider string `json:"provider"`
+		}
+		if json.Unmarshal([]byte(cred.Metadata), &meta) == nil && meta.Provider != "" {
+			provName = meta.Provider
+		}
+		prov, err = s.cardProvider(provName)
+		if err != nil {
+			slog.Debug("card provider unavailable", "error", err)
+			s.auditDeny(a.ID, g.Handle, "card", merchant, "provider_error")
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pay failed"})
+			return
+		}
 	}
 	defer func() {
 		for k := range fields {
 			fields[k] = ""
 		}
 	}()
-	provName := "vgs"
-	var meta struct {
-		Provider string `json:"provider"`
-	}
-	if json.Unmarshal([]byte(cred.Metadata), &meta) == nil && meta.Provider != "" {
-		provName = meta.Provider
-	}
-	prov, err := s.cardProvider(provName)
-	if err != nil {
-		slog.Debug("card provider unavailable", "error", err)
-		s.auditDeny(a.ID, g.Handle, "card", merchant, "provider_error")
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pay failed"})
-		return
-	}
 	// Fill before Consume: a fill failure must not burn a grant use.
 	freq, err := card.Fill(card.PayRequest{Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body}, fields)
 	if err != nil {
@@ -1479,6 +1540,9 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 	}
 	if err := s.st.AddGrantSpend(g.ID, req.Amount); err != nil {
 		slog.Debug("spend record failed", "error", err)
+	}
+	if kind == "issuer" && ((g.MaxUses > 0 && g.Uses+1 >= g.MaxUses) || (p.Spend != nil && p.Spend.Total > 0 && g.Spent+req.Amount >= p.Spend.Total)) {
+		s.closeIssuedCard(g.ID, "exhausted")
 	}
 	res, err := card.Do(r.Context(), prov, freq, fields)
 	if err != nil {
@@ -1860,14 +1924,31 @@ func (s *Server) ownerApprove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if kind, _, _, _ := handle.Parse(issueHandle); kind == "issuer" {
+		cred, cerr := s.st.GetCredential(issueHandle)
+		if cerr != nil {
+			_ = s.st.RevokeGrant(g.ID)
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown handle"})
+			return
+		}
+		if cerr := s.mintIssuedCard(g, cred, ap.Purpose); cerr != nil {
+			// Mint failed: revoke the grant, leave the approval pending.
+			_ = s.st.RevokeGrant(g.ID)
+			slog.Debug("issuer card mint failed", "error", cerr)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card issue failed"})
+			return
+		}
+	}
 	ct, err := crypto.Encrypt(s.dek, []byte(token))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "encrypt failed"})
 		return
 	}
 	if err := s.st.DecideApproval(id, "approved", g.ID, ct); err != nil {
-		// Lost a race against another decider — undo the issued grant.
+		// Lost a race against another decider — undo the issued grant
+		// and any card minted for it.
 		_ = s.st.RevokeGrant(g.ID)
+		s.closeIssuedCard(g.ID, "revoked")
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "not pending"})
 		return
 	}
@@ -1959,6 +2040,7 @@ func (s *Server) ownerGrants(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) ownerRevoke(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	s.closeIssuedCard(id, "revoked")
 	if err := s.st.RevokeGrant(id); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "grant not found"})
 		return

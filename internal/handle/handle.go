@@ -34,6 +34,11 @@ func New(kind, site, label string) (Handle, error) {
 			return "", fmt.Errorf("invalid wallet handle %q", label)
 		}
 		return Handle("wallet://" + label), nil
+	case "issuer":
+		if !segment.MatchString(label) {
+			return "", fmt.Errorf("invalid issuer handle %q", label)
+		}
+		return Handle("issuer://" + label), nil
 	default:
 		return "", fmt.Errorf("unknown handle kind %q", kind)
 	}
@@ -65,6 +70,12 @@ func Parse(h string) (kind, site, label string, err error) {
 			return "", "", "", fmt.Errorf("malformed wallet handle %q", h)
 		}
 		return "wallet", "", rest, nil
+	}
+	if rest, ok := strings.CutPrefix(h, "issuer://"); ok {
+		if rest == "" {
+			return "", "", "", fmt.Errorf("malformed issuer handle %q", h)
+		}
+		return "issuer", "", rest, nil
 	}
 	return "", "", "", fmt.Errorf("unrecognized handle %q", h)
 }

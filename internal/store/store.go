@@ -68,6 +68,23 @@ type Passkey struct {
 	LastUsedAt *time.Time
 }
 
+// IssuedCard is a card minted by an issuer driver for one grant. Only
+// display metadata is stored — never PAN or CVC.
+type IssuedCard struct {
+	ID        string
+	GrantID   string
+	Handle    string
+	Driver    string
+	CardID    string
+	Brand     string
+	Last4     string
+	ExpMonth  string
+	ExpYear   string
+	Status    string // active | closed
+	CreatedAt time.Time
+	ClosedAt  *time.Time
+}
+
 // Capture is a pending browser card-capture session. The token is the only
 // auth to the capture page; once completed it's marked used and the card
 // fields land in credentials.
@@ -139,6 +156,15 @@ type Store interface {
 	// (new sign counter) and stamps last_used_at.
 	TouchPasskey(id, credential string) error
 	DeletePasskey(id string) error
+
+	// IssuedCards tracks cards minted by the issuer rail: exactly one per
+	// grant on an issuer:// handle.
+	AddIssuedCard(c *IssuedCard) error
+	GetIssuedCardByGrant(grantID string) (*IssuedCard, error)
+	// ListIssuedCards returns cards, active only when activeOnly is set.
+	ListIssuedCards(activeOnly bool) ([]IssuedCard, error)
+	// CloseIssuedCard marks the card closed (ErrNotFound if missing).
+	CloseIssuedCard(id string) error
 
 	Meta(key string) (string, error)
 	SetMeta(key, value string) error

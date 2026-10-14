@@ -329,6 +329,36 @@ func TestRevokeGrantsForHandle(t *testing.T) {
 	}
 }
 
+func TestIssuedCardRoundTrip(t *testing.T) {
+	s := tempStore(t)
+	c := &IssuedCard{ID: "ic_1", GrantID: "g1", Handle: "issuer://personal", Driver: "mock", CardID: "mock_x", Brand: "visa", Last4: "4242", ExpMonth: "01", ExpYear: "2030", Status: "active"}
+	if err := s.AddIssuedCard(c); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetIssuedCardByGrant("g1")
+	if err != nil || got.Last4 != "4242" || got.Status != "active" {
+		t.Fatalf("get: %+v %v", got, err)
+	}
+	if _, err := s.GetIssuedCardByGrant("nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if l, _ := s.ListIssuedCards(true); len(l) != 1 {
+		t.Fatalf("active list: %d", len(l))
+	}
+	if err := s.CloseIssuedCard("ic_1"); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := s.ListIssuedCards(true); len(l) != 0 {
+		t.Fatalf("active after close: %d", len(l))
+	}
+	if l, _ := s.ListIssuedCards(false); len(l) != 1 || l[0].Status != "closed" || l[0].ClosedAt == nil {
+		t.Fatalf("closed list: %+v", l)
+	}
+	if err := s.CloseIssuedCard("nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
 func TestPasskeyRoundTrip(t *testing.T) {
 	s := tempStore(t)
 	if ps, err := s.ListPasskeys(); err != nil || len(ps) != 0 {
