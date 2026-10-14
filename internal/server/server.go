@@ -33,7 +33,7 @@ import (
 	"github.com/joalavedra/valet/internal/edge/browser"
 	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
-	issuergedg "github.com/joalavedra/valet/internal/edge/issuer"
+	issueredge "github.com/joalavedra/valet/internal/edge/issuer"
 	"github.com/joalavedra/valet/internal/edge/wallet"
 	mppedg "github.com/joalavedra/valet/internal/edge/wallet/mpp"
 	"github.com/joalavedra/valet/internal/edge/wallet/openfort"
@@ -180,6 +180,13 @@ func New(st store.Store, issuer *grant.Issuer, chain *audit.Chain, filler browse
 		}
 	}()
 	return s
+}
+
+// Close stops background work (the issued-card sweeper).
+func (s *Server) Close() {
+	if s.sweepStop != nil {
+		s.sweepStop()
+	}
 }
 
 // SetCDPDefault sets the fallback CDP endpoint (e.g. VALET_CDP_URL) used
@@ -1487,7 +1494,7 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		}
 		prov = s.cardProv // test seam; default is the fenced direct transport
 		if prov == nil {
-			prov = issuergedg.DirectProvider(s.allowPrivate)
+			prov = issueredge.DirectProvider(s.allowPrivate)
 		}
 	} else {
 		cred, err := s.st.GetCredential(g.Handle)
@@ -1541,10 +1548,12 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 	if err := s.st.AddGrantSpend(g.ID, req.Amount); err != nil {
 		slog.Debug("spend record failed", "error", err)
 	}
+	res, err := card.Do(r.Context(), prov, freq, fields)
+	// The grant use is spent either way — close an exhausted issuer card
+	// only after the payment was actually sent upstream.
 	if kind == "issuer" && ((g.MaxUses > 0 && g.Uses+1 >= g.MaxUses) || (p.Spend != nil && p.Spend.Total > 0 && g.Spent+req.Amount >= p.Spend.Total)) {
 		s.closeIssuedCard(g.ID, "exhausted")
 	}
-	res, err := card.Do(r.Context(), prov, freq, fields)
 	if err != nil {
 		slog.Debug("card pay failed", "error", err)
 		s.auditDeny(a.ID, g.Handle, "card", merchant, "pay_error")

@@ -160,6 +160,7 @@ type Store interface {
 	// IssuedCards tracks cards minted by the issuer rail: exactly one per
 	// grant on an issuer:// handle.
 	AddIssuedCard(c *IssuedCard) error
+	GetIssuedCard(id string) (*IssuedCard, error)
 	GetIssuedCardByGrant(grantID string) (*IssuedCard, error)
 	// ListIssuedCards returns cards, active only when activeOnly is set.
 	ListIssuedCards(activeOnly bool) ([]IssuedCard, error)

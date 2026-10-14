@@ -162,19 +162,8 @@ func (s *Server) ownerCards(w http.ResponseWriter, r *http.Request) {
 // ownerCardClose closes the card and revokes the grant it is bound to.
 func (s *Server) ownerCardClose(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cards, err := s.st.ListIssuedCards(false)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	var row *store.IssuedCard
-	for i := range cards {
-		if cards[i].ID == id {
-			row = &cards[i]
-			break
-		}
-	}
-	if row == nil {
+	row, err := s.st.GetIssuedCard(id)
+	if err != nil || row == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "card not found"})
 		return
 	}

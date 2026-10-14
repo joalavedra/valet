@@ -77,6 +77,7 @@ func testServer(t *testing.T) (*Server, *store.SQLite, string) {
 	t.Cleanup(func() { st.Close() })
 	dek, _ := crypto.GenerateDEK()
 	srv := New(st, grant.NewIssuer(st, dek), audit.New(st), &fakeFiller{pageURL: "https://github.com/login"}, dek, nil)
+	t.Cleanup(srv.Close)
 	token := "tok-abc"
 	if _, err := st.CreateAgent("bot", hashToken(token)); err != nil {
 		t.Fatal(err)
@@ -1014,6 +1015,7 @@ func approvalServer(t *testing.T, mode string) (*Server, *store.SQLite, []byte, 
 	t.Cleanup(func() { st.Close() })
 	dek, _ := crypto.GenerateDEK()
 	srv := New(st, grant.NewIssuer(st, dek), audit.New(st), &fakeFiller{pageURL: "https://github.com/login"}, dek, nil)
+	t.Cleanup(srv.Close)
 	token := "tok-abc"
 	if _, err := st.CreateAgent("bot", hashToken(token)); err != nil {
 		t.Fatal(err)
@@ -2554,12 +2556,18 @@ func TestIssuerGrantMintsCard(t *testing.T) {
 func TestIssuerPayRevealAndCloseOnExhaust(t *testing.T) {
 	srv, st, tok := testServer(t)
 	h := addIssuerCred(t, srv, st, "personal")
-	var pan, cvc string
+	var pan, cvc, gidRef string
+	var activeAtRequest bool
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		pan = "411111"
 		if !strings.Contains(string(b), pan) {
 			t.Error("placeholder not substituted")
+		}
+		// The card must still be active while the payment is in flight;
+		// closing it before Do() would make a real issuer decline this.
+		if ic, err := st.GetIssuedCardByGrant(gidRef); err == nil && ic.Status == "active" {
+			activeAtRequest = true
 		}
 		fmt.Fprint(w, `{"charged":true}`)
 	}))
@@ -2570,6 +2578,7 @@ func TestIssuerPayRevealAndCloseOnExhaust(t *testing.T) {
 	gtok, gid := issuerGrant(t, srv, tok, h,
 		map[string]any{"spend": map[string]any{"merchants": []string{host}, "per_tx": 500}},
 		map[string]any{"max_uses": 1})
+	gidRef = gid
 	rec, req := payReq(t, tok, map[string]any{
 		"grant_token": gtok, "url": upstream.URL + "/charge", "method": "POST",
 		"body":   `{"pan":"{{card.number}}","cvc":"{{card.cvc}}"}`,
@@ -2578,6 +2587,9 @@ func TestIssuerPayRevealAndCloseOnExhaust(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	if !activeAtRequest {
+		t.Fatal("card was closed before the payment was sent upstream")
 	}
 	if strings.Contains(rec.Body.String(), pan) || (cvc != "" && strings.Contains(rec.Body.String(), cvc)) {
 		t.Fatal("response leaked card values")

@@ -487,6 +487,10 @@ func (s *SQLite) scanIssuedCard(row interface{ Scan(...any) error }) (*IssuedCar
 
 const issuedCardCols = `id, grant_id, handle, driver, card_id, brand, last4, exp_month, exp_year, status, created_at, closed_at`
 
+func (s *SQLite) GetIssuedCard(id string) (*IssuedCard, error) {
+	return s.scanIssuedCard(s.db.QueryRow(`SELECT `+issuedCardCols+` FROM issued_cards WHERE id = ?`, id))
+}
+
 func (s *SQLite) GetIssuedCardByGrant(grantID string) (*IssuedCard, error) {
 	return s.scanIssuedCard(s.db.QueryRow(`SELECT `+issuedCardCols+` FROM issued_cards WHERE grant_id = ?`, grantID))
 }

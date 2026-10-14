@@ -42,6 +42,7 @@ var serverCmd = &cobra.Command{
 			}
 		}
 		srv := server.New(st, iss, audit.New(st), &browser.CDPFiller{}, dek, eg)
+		defer srv.Close()
 		srv.SetCDPDefault(os.Getenv("VALET_CDP_URL"))
 		listen := os.Getenv("VALET_LISTEN")
 		if listen == "" {
