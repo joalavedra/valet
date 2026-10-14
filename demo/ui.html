@@ -285,6 +285,7 @@ let dismissedApproval = null; // request id the owner closed — don't reopen vi
 const approvalPanels = {};    // request id → in-thread panel
 const approvals = {};         // request id → last approval_required payload
 let lastProduct = null;       // the product the agent is buying, for the receipt
+let pendingPoll = null;       // fallback poll after a dropped chat stream
 
 /* ---------- Passkeys (WebAuthn) ----------
    Valet hands out options as JSON with base64url buffers; the browser API
@@ -578,9 +579,9 @@ async function send() {
     if (!gotDone) {
       activity('Waiting for your approval…', 'run');
       const t0 = Date.now();
-      const t = setInterval(async () => {
+      pendingPoll = setInterval(async () => {
         await pollPending();
-        if (currentApprovalId || Date.now() - t0 > 60000) { clearInterval(t); settleActivities(); }
+        if (currentApprovalId || Date.now() - t0 > 60000) { clearInterval(pendingPoll); pendingPoll = null; settleActivities(); }
       }, 3000);
     }
   }
@@ -711,6 +712,8 @@ async function decide(action) {
       else onStep({id: 'budget', label: 'You denied the budget', status: 'fail'});
     } else if (row) { setActivity(row, 'Budget approved', 'ok'); }
     else onStep({id: 'budget', label: 'Budget approved', status: 'ok'});
+    if (pendingPoll) { clearInterval(pendingPoll); pendingPoll = null; }
+    settleActivities();
   }
   const approved = action === 'approve';
   const card = chosenCard(id);
