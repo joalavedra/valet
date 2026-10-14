@@ -281,6 +281,7 @@ let catalog = {};             // product id → product
 let busy = false;
 let sheetReq = null;          // request id shown in the approval sheet
 let currentApprovalId = null;
+let dismissedApproval = null; // request id the owner closed — don't reopen via polls
 const approvalPanels = {};    // request id → in-thread panel
 const approvals = {};         // request id → last approval_required payload
 let lastProduct = null;       // the product the agent is buying, for the receipt
@@ -594,7 +595,7 @@ function openSheet(el) {
 function closeSheet() {
   if (!openSheetEl) return;
   openSheetEl.classList.remove('open'); $('scrim').classList.remove('open');
-  if (openSheetEl === $('approve-sheet')) sheetReq = null;
+  if (openSheetEl === $('approve-sheet')) { dismissedApproval = sheetReq; sheetReq = null; }
   openSheetEl = null;
 }
 $('scrim').onclick = closeSheet;
@@ -607,6 +608,8 @@ function showApproval(d, reopen) {
   if (prev && prev !== d && prev.card && !d.card) d.card = prev.card; // keep the owner's pick across polls
   approvals[d.request_id] = d;
   approvalPanel(d);
+  if (reopen || (dismissedApproval && dismissedApproval !== d.request_id)) dismissedApproval = null;
+  if (!reopen && dismissedApproval === d.request_id) return;
   if (!reopen && currentApprovalId === d.request_id && sheetReq === d.request_id) return;
   currentApprovalId = d.request_id;
   sheetReq = d.request_id;
