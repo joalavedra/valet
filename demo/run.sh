@@ -38,11 +38,7 @@ export VALET_PUBLIC_URL="$URL/valet"
 # one can be detected next time.
 OLD_URL="${DEMO_LAST_PUBLIC_URL:-}"
 touch .env
-if grep -q '^DEMO_LAST_PUBLIC_URL=' .env; then
-  sed -i "s|^DEMO_LAST_PUBLIC_URL=.*|DEMO_LAST_PUBLIC_URL=$URL|" .env || true
-else
-  echo "DEMO_LAST_PUBLIC_URL=$URL" >> .env
-fi
+{ grep -v '^DEMO_LAST_PUBLIC_URL=' .env || true; echo "DEMO_LAST_PUBLIC_URL=$URL"; } > .env.tmp && mv .env.tmp .env
 
 # Generate secrets once and persist them in .env — the compose DB survives
 # relaunches, so re-generating the master password would break decryption.
