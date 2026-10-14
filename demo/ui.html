@@ -445,10 +445,16 @@ function checkoutPanel(verb) {
 function tickCheckout() {
   checkout.el.querySelector('[data-clock]').textContent = Math.round((Date.now() - checkout.t0) / 1000) + 's';
 }
-function stopCheckout() {
+// Freeze the clock but keep the card live so a step the server still
+// streams for it lands on the same card instead of opening a new one.
+function freezeCheckout() {
   if (!checkout) return;
   clearInterval(checkout.timer);
   tickCheckout();
+}
+function stopCheckout() {
+  if (!checkout) return;
+  freezeCheckout();
   checkout.el.querySelectorAll('.step[data-status="run"]').forEach(r => setActivity(r, '', 'ok'));
   checkout = null;
 }
@@ -579,10 +585,16 @@ async function send() {
     if (!gotDone) {
       activity('Waiting for your approval…', 'run');
       const t0 = Date.now();
-      pendingPoll = setInterval(async () => {
+      if (pendingPoll) clearInterval(pendingPoll);
+      const poll = setInterval(async () => {
         await pollPending();
-        if (currentApprovalId || Date.now() - t0 > 60000) { clearInterval(pendingPoll); pendingPoll = null; settleActivities(); }
+        if (currentApprovalId || Date.now() - t0 > 60000) {
+          clearInterval(poll);
+          if (pendingPoll === poll) pendingPoll = null;
+          settleActivities();
+        }
       }, 3000);
+      pendingPoll = poll;
     }
   }
 }
@@ -606,7 +618,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet()
 function showApproval(d, reopen) {
   if (!d || !d.request_id) return;
   const prev = approvals[d.request_id];
-  if (prev && prev !== d && prev.card && !d.card) d.card = prev.card; // keep the owner's pick across polls
+  if (prev && prev !== d && prev.card) d.card = prev.card; // the live record holds the owner's latest pick
   approvals[d.request_id] = d;
   approvalPanel(d);
   if (reopen || (dismissedApproval && dismissedApproval !== d.request_id)) dismissedApproval = null;
@@ -708,7 +720,7 @@ async function decide(action) {
   if (checkout) {
     const row = checkout.rows['budget'];
     if (action === 'deny') {
-      if (row) { setActivity(row, 'You denied the budget', 'fail'); stopCheckout(); }
+      if (row) { setActivity(row, 'You denied the budget', 'fail'); freezeCheckout(); }
       else onStep({id: 'budget', label: 'You denied the budget', status: 'fail'});
     } else if (row) { setActivity(row, 'Budget approved', 'ok'); }
     else onStep({id: 'budget', label: 'Budget approved', status: 'ok'});
