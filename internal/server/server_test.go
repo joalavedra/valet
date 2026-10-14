@@ -2792,9 +2792,15 @@ func TestIssuerPaySerializesLastUse(t *testing.T) {
 	}
 }
 
+var (
+	flakyOnce   sync.Once
+	flakyDriver = &flakyIssuer{}
+)
+
 func TestIssuerCloseRetryAfterDriverFailure(t *testing.T) {
-	flaky := &flakyIssuer{failClose: 1}
-	issueredge.Register("flaky", flaky)
+	flakyOnce.Do(func() { issueredge.Register("flaky", flakyDriver) })
+	flaky := flakyDriver
+	flaky.failClose = 1
 	srv, st, tok := testServer(t)
 	h := addIssuerCredDriver(t, srv, st, "personal", "flaky")
 	_, gid := issuerGrant(t, srv, tok, h, map[string]any{"spend": map[string]any{"merchants": []string{"*"}}}, nil)
