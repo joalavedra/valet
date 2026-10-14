@@ -638,7 +638,10 @@ function showApproval(d, reopen) {
   $('ap-deny').onclick = () => decide('deny');
   if ($('ap-add')) $('ap-add').onclick = startAddCard;
   if ($('ap-card')) $('ap-card').onchange = e => {
-    d.card = e.target.value;
+    // Write on the live record too — the next poll replaces
+    // approvals[id] and would otherwise drop this pick.
+    const cur = approvals[d.request_id] || d;
+    cur.card = e.target.value; d.card = cur.card;
     const c = chosenCard(d.request_id);
     $('ap-card-face').innerHTML = `${cardMark(c)}<span>${cardName(c)}</span><em>${esc(c.label)}</em>`;
   };
@@ -695,6 +698,16 @@ async function decide(action) {
     toast(e.name === 'NotAllowedError' ? 'Passkey cancelled' : e.status === 403 ? 'Passkey check failed — try again' : 'Could not reach Valet — try again');
     showApproval(approvals[id], true);
     return;
+  }
+  // Reflect the decision on the live checkout card even if the SSE
+  // stream already died — avoid a second panel by updating the row.
+  if (checkout) {
+    const row = checkout.rows['budget'];
+    if (action === 'deny') {
+      if (row) { setActivity(row, 'You denied the budget', 'fail'); stopCheckout(); }
+      else onStep({id: 'budget', label: 'You denied the budget', status: 'fail'});
+    } else if (row) { setActivity(row, 'Budget approved', 'ok'); }
+    else onStep({id: 'budget', label: 'Budget approved', status: 'ok'});
   }
   const approved = action === 'approve';
   const card = chosenCard(id);

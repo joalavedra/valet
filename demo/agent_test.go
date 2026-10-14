@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -309,4 +310,44 @@ func TestApproveRelaysCardAndPasskey(t *testing.T) {
 	if rec = approve(`{"card":"../x"}`); rec.Code != 400 {
 		t.Fatalf("bad label: want 400, got %d", rec.Code)
 	}
+}
+
+// chatHandler must emit SSE comment pings while a tool call is in flight,
+// so tunnels don't kill the stream during the approval wait.
+func TestChatHandlerSSEPing(t *testing.T) {
+	old := ssePingInterval
+	ssePingInterval = 10 * time.Millisecond
+	defer func() { ssePingInterval = old }()
+
+	gem := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(80 * time.Millisecond) // hold the stream open past a few ticks
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}`))
+	}))
+	defer gem.Close()
+	gemURL, _ := url.Parse(gem.URL)
+
+	a := testApp()
+	a.gemini = newGeminiClient("k", "m")
+	a.gemini.http = &http.Client{Transport: rewriteTo{to: gemURL}}
+
+	r := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"message":"hi"}`))
+	w := httptest.NewRecorder()
+	a.chatHandler(w, r)
+	body := w.Body.String()
+	if !strings.Contains(body, ": ping") {
+		t.Fatalf("no SSE ping in stream:\n%s", body)
+	}
+	if !strings.Contains(body, "event: done") {
+		t.Fatalf("no done event in stream:\n%s", body)
+	}
+}
+
+// rewriteTo redirects all requests to a test server (Gemini's URL is fixed).
+type rewriteTo struct{ to *url.URL }
+
+func (t rewriteTo) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.URL.Scheme, r.URL.Host = t.to.Scheme, t.to.Host
+	return http.DefaultTransport.RoundTrip(r)
 }
