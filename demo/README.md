@@ -63,6 +63,8 @@ Then in chat: "Buy the coffee beans" → approve the bottom-sheet → receipt.
 | `VGS_USERNAME`/`VGS_PASSWORD` | vault access credentials — the outbound proxy auth Valet uses for payments |
 | `VGS_VAULT_ID`/`VGS_ENV` | `tnt…` vault id; `sandbox` (default) or `live` |
 
+Passkeys are bound to the `VALET_PASSKEY_ORIGINS` hostname (the WebAuthn RP ID): after a tunnel restart with a new `trycloudflare` host, previously enrolled passkeys stop working and approvals 403. `run.sh` detects the host change and offers to remove them; manual recovery: `docker compose run --rm --no-deps -T --entrypoint /valet -e VALET_DB=/data/valet.db valet-init passkey reset --yes` (or `docker compose down -v` to wipe the volume).
+
 ## Money flow
 
 1. Agent → `POST /v1/grants` `{handle:"card://personal", purpose, ttl:600, max_uses:1, spend:{per_tx, merchants:[demo host]}}` → `202 pending_approval` (because `VALET_REQUIRE_APPROVAL=card`).
