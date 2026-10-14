@@ -463,6 +463,74 @@ func (s *SQLite) TouchPasskey(id, credential string) error {
 	return nil
 }
 
+func (s *SQLite) AddIssuedCard(c *IssuedCard) error {
+	_, err := s.db.Exec(`INSERT INTO issued_cards (id, grant_id, handle, driver, card_id, brand, last4, exp_month, exp_year, status) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		c.ID, c.GrantID, c.Handle, c.Driver, c.CardID, c.Brand, c.Last4, c.ExpMonth, c.ExpYear, c.Status)
+	return err
+}
+
+func (s *SQLite) scanIssuedCard(row interface{ Scan(...any) error }) (*IssuedCard, error) {
+	var c IssuedCard
+	var closed sql.NullTime
+	err := row.Scan(&c.ID, &c.GrantID, &c.Handle, &c.Driver, &c.CardID, &c.Brand, &c.Last4, &c.ExpMonth, &c.ExpYear, &c.Status, &c.CreatedAt, &closed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if closed.Valid {
+		c.ClosedAt = &closed.Time
+	}
+	return &c, nil
+}
+
+const issuedCardCols = `id, grant_id, handle, driver, card_id, brand, last4, exp_month, exp_year, status, created_at, closed_at`
+
+func (s *SQLite) GetIssuedCard(id string) (*IssuedCard, error) {
+	return s.scanIssuedCard(s.db.QueryRow(`SELECT `+issuedCardCols+` FROM issued_cards WHERE id = ?`, id))
+}
+
+func (s *SQLite) GetIssuedCardByGrant(grantID string) (*IssuedCard, error) {
+	return s.scanIssuedCard(s.db.QueryRow(`SELECT `+issuedCardCols+` FROM issued_cards WHERE grant_id = ?`, grantID))
+}
+
+func (s *SQLite) ListIssuedCards(activeOnly bool) ([]IssuedCard, error) {
+	q := `SELECT ` + issuedCardCols + ` FROM issued_cards`
+	if activeOnly {
+		q += ` WHERE status = 'active'`
+	}
+	rows, err := s.db.Query(q + ` ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []IssuedCard
+	for rows.Next() {
+		var c IssuedCard
+		var closed sql.NullTime
+		if err := rows.Scan(&c.ID, &c.GrantID, &c.Handle, &c.Driver, &c.CardID, &c.Brand, &c.Last4, &c.ExpMonth, &c.ExpYear, &c.Status, &c.CreatedAt, &closed); err != nil {
+			return nil, err
+		}
+		if closed.Valid {
+			c.ClosedAt = &closed.Time
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) CloseIssuedCard(id string) error {
+	res, err := s.db.Exec(`UPDATE issued_cards SET status = 'closed', closed_at = ? WHERE id = ?`, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *SQLite) DeletePasskey(id string) error {
 	res, err := s.db.Exec(`DELETE FROM passkeys WHERE id = ?`, id)
 	if err != nil {

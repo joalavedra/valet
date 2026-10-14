@@ -17,4 +17,7 @@ var grantSpentSQL string
 //go:embed migrations/005_passkeys.sql
 var passkeysSQL string
 
-var migrations = []string{initSQL, capturesSQL, approvalsSQL, grantSpentSQL, passkeysSQL}
+//go:embed migrations/006_issued_cards.sql
+var issuedCardsSQL string
+
+var migrations = []string{initSQL, capturesSQL, approvalsSQL, grantSpentSQL, passkeysSQL, issuedCardsSQL}

@@ -25,7 +25,7 @@ import (
 
 var credAddType, credAddLabel, credAddSite, credAddLast4 string
 var credAddTokenize bool
-var credAddAddress, credAddNetwork, credAddSvmAccountID, credAddSvmAddress string
+var credAddAddress, credAddNetwork, credAddSvmAccountID, credAddSvmAddress, credAddDriver string
 
 var stdinReader = bufio.NewReader(os.Stdin)
 
@@ -61,6 +61,8 @@ var credAddCmd = &cobra.Command{
 			h, err = handle.New("card", "", credAddLabel)
 		case "wallet":
 			h, err = handle.New("wallet", "", credAddLabel)
+		case "issuer":
+			h, err = handle.New("issuer", "", credAddLabel)
 		default:
 			return fmt.Errorf("unknown --type %q", credAddType)
 		}
@@ -82,6 +84,10 @@ var credAddCmd = &cobra.Command{
 			}
 		case "wallet":
 			prompts = []string{"secret_key", "wallet_secret", "account_id (optional)", "svm_account_id (optional)", "svm_address (optional)"}
+		case "issuer":
+			if credAddDriver != "mock" {
+				prompts = []string{"api_key"}
+			}
 		}
 		fieldName := func(prompt string) string {
 			return strings.Split(prompt, " ")[0]
@@ -126,6 +132,9 @@ var credAddCmd = &cobra.Command{
 				return err
 			}
 			metadata = meta
+		case "issuer":
+			meta, _ := json.Marshal(map[string]string{"driver": credAddDriver})
+			metadata = string(meta)
 		}
 		pt, _ := json.Marshal(fields)
 		ct, err := crypto.Encrypt(dek, pt)
@@ -148,6 +157,8 @@ var credAddCmd = &cobra.Command{
 			}
 			json.Unmarshal([]byte(metadata), &m)
 			fmt.Printf("stored wallet://%s (%s on %s)\n", credAddLabel, m.Address, m.Network)
+		case "issuer":
+			fmt.Printf("stored issuer://%s (driver %s)\n", credAddLabel, credAddDriver)
 		}
 		return nil
 	},
@@ -284,6 +295,7 @@ func init() {
 	credAddCmd.Flags().StringVar(&credAddNetwork, "network", "eip155:84532", "wallet only: CAIP-2 network the wallet may pay on")
 	credAddCmd.Flags().StringVar(&credAddSvmAccountID, "svm-account-id", "", "wallet only: Openfort SVM backend account id (with --svm-address)")
 	credAddCmd.Flags().StringVar(&credAddSvmAddress, "svm-address", "", "wallet only: base58 Solana address (with --svm-account-id)")
+	credAddCmd.Flags().StringVar(&credAddDriver, "driver", "mock", "issuer only: issuer driver (mock; lithic/link later)")
 	credAddCmd.Flags().BoolVar(&credAddTokenize, "tokenize", false, "card only: tokenize the raw PAN/CVC via the provider's Vault API (VGS_CLIENT_ID/VGS_CLIENT_SECRET) and store only the aliases")
 	credAddCmd.MarkFlagRequired("type")
 	credAddCmd.MarkFlagRequired("label")
