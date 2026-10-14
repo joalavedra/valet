@@ -720,6 +720,10 @@ func (s *Server) createGrant(w http.ResponseWriter, r *http.Request, a *store.Ag
 		}
 		cred = c
 	}
+	if kind, _, _, perr := handle.Parse(req.Handle); perr == nil && kind == "issuer" && cred.Type != "issuer" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "handle_type_mismatch"})
+		return
+	}
 	p := req.Policy
 	if p == nil {
 		p = &policy.Policy{}
@@ -762,6 +766,10 @@ func (s *Server) createGrant(w http.ResponseWriter, r *http.Request, a *store.Ag
 	}
 	if err := s.mintIssuedCard(g, cred, req.Purpose); err != nil {
 		_ = s.st.RevokeGrant(g.ID)
+		if errors.Is(err, errUnscopedIssuerGrant) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "issuer grant must restrict merchants"})
+			return
+		}
 		slog.Debug("issuer card mint failed", "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card issue failed"})
 		return
@@ -1428,6 +1436,17 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant is not for a card handle"})
 		return
 	}
+	if kind == "issuer" {
+		// Serialize issuer pays per grant: re-check uses/spend against a
+		// fresh snapshot so two parallel last-use calls can't both pass.
+		unlock := s.lockGrant(g.ID)
+		defer unlock()
+		if g, err = s.st.GetGrant(g.ID); err != nil {
+			s.auditDeny(a.ID, g.Handle, "card", "", "grant_revoked")
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant revoked"})
+			return
+		}
+	}
 	u, err := url.Parse(req.URL)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
 		s.auditDeny(a.ID, g.Handle, "card", "", "bad_url")
@@ -1550,8 +1569,13 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 	}
 	res, err := card.Do(r.Context(), prov, freq, fields)
 	// The grant use is spent either way — close an exhausted issuer card
-	// only after the payment was actually sent upstream.
-	if kind == "issuer" && ((g.MaxUses > 0 && g.Uses+1 >= g.MaxUses) || (p.Spend != nil && p.Spend.Total > 0 && g.Spent+req.Amount >= p.Spend.Total)) {
+	// only after the payment was actually sent upstream. Effective max
+	// follows the stricter of the grant's and the policy's max_uses.
+	effectiveMax := g.MaxUses
+	if p.MaxUses > 0 && (effectiveMax == 0 || p.MaxUses < effectiveMax) {
+		effectiveMax = p.MaxUses
+	}
+	if kind == "issuer" && ((effectiveMax > 0 && g.Uses+1 >= effectiveMax) || (p.Spend != nil && p.Spend.Total > 0 && g.Spent+req.Amount >= p.Spend.Total)) {
 		s.closeIssuedCard(g.ID, "exhausted")
 	}
 	if err != nil {
@@ -1940,9 +1964,18 @@ func (s *Server) ownerApprove(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown handle"})
 			return
 		}
+		if cred.Type != "issuer" {
+			_ = s.st.RevokeGrant(g.ID)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "handle_type_mismatch"})
+			return
+		}
 		if cerr := s.mintIssuedCard(g, cred, ap.Purpose); cerr != nil {
 			// Mint failed: revoke the grant, leave the approval pending.
 			_ = s.st.RevokeGrant(g.ID)
+			if errors.Is(cerr, errUnscopedIssuerGrant) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "issuer grant must restrict merchants"})
+				return
+			}
 			slog.Debug("issuer card mint failed", "error", cerr)
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "card issue failed"})
 			return

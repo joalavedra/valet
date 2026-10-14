@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -31,6 +32,9 @@ func issuerDriverOf(c *store.Credential) string {
 	}
 	return "mock"
 }
+
+// errUnscopedIssuerGrant rejects issuer grants with no merchant scope.
+var errUnscopedIssuerGrant = errors.New("issuer grant must restrict merchants")
 
 // mintIssuedCard issues one scoped card for a grant on an issuer:// handle
 // and records its display metadata (never PAN/CVC).
@@ -60,6 +64,9 @@ func (s *Server) mintIssuedCard(g *store.Grant, cred *store.Credential, purpose 
 		spec.Total = p.Spend.Total
 		spec.Currency = p.Spend.Currency
 	}
+	if len(spec.Merchants) == 0 {
+		return errUnscopedIssuerGrant
+	}
 	c, err := driver.Issue(context.Background(), spec)
 	if err != nil {
 		return err
@@ -85,8 +92,8 @@ func (s *Server) mintIssuedCard(g *store.Grant, cred *store.Credential, purpose 
 	return nil
 }
 
-// closeIssuedCard closes the card bound to a grant — best-effort: a driver
-// failure still marks the row closed.
+// closeIssuedCard closes the card bound to a grant. A driver failure
+// leaves the row active so the sweeper retries it next tick.
 func (s *Server) closeIssuedCard(grantID, reason string) {
 	row, err := s.st.GetIssuedCardByGrant(grantID)
 	if err != nil || row == nil || row.Status != "active" {
@@ -94,7 +101,9 @@ func (s *Server) closeIssuedCard(grantID, reason string) {
 	}
 	if drv, err := s.cardIssuer(row.Driver); err == nil {
 		if cerr := drv.Close(context.Background(), row.CardID); cerr != nil {
-			slog.Debug("issuer close failed", "card_id", row.CardID, "error", cerr)
+			// Leave the row active so the sweeper retries next tick.
+			slog.Warn("issuer close failed; will retry", "card_id", row.CardID, "error", cerr)
+			return
 		}
 	}
 	if err := s.st.CloseIssuedCard(row.ID); err != nil {
@@ -104,7 +113,8 @@ func (s *Server) closeIssuedCard(grantID, reason string) {
 	_ = s.chain.Append(&store.AuditEntry{Handle: row.Handle, Edge: "issuer", Target: "card", Decision: "card_closed", Detail: string(detail)})
 }
 
-// sweepIssuedCards closes active cards whose grant is revoked or expired.
+// sweepIssuedCards closes active cards whose grant is revoked, expired or
+// exhausted (effective max_uses / spend total).
 // The background ticker calls it; tests can call it directly.
 func (s *Server) sweepIssuedCards() {
 	cards, err := s.st.ListIssuedCards(true)
@@ -123,8 +133,25 @@ func (s *Server) sweepIssuedCards() {
 			s.closeIssuedCard(c.GrantID, "revoked")
 		case !now.Before(g.ExpiresAt):
 			s.closeIssuedCard(c.GrantID, "expired")
+		case grantExhausted(g):
+			s.closeIssuedCard(c.GrantID, "exhausted")
 		}
 	}
+}
+
+// grantExhausted reports whether a grant hit its effective use cap or its
+// cumulative spend total (same effective-max rule as the owner grant view).
+func grantExhausted(g *store.Grant) bool {
+	var p policy.Policy
+	_ = json.Unmarshal([]byte(g.Policy), &p)
+	effectiveMax := g.MaxUses
+	if p.MaxUses > 0 && (effectiveMax == 0 || p.MaxUses < effectiveMax) {
+		effectiveMax = p.MaxUses
+	}
+	if effectiveMax > 0 && g.Uses >= effectiveMax {
+		return true
+	}
+	return p.Spend != nil && p.Spend.Total > 0 && g.Spent >= p.Spend.Total
 }
 
 type issuedCardView struct {

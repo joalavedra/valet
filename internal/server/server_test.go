@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/joalavedra/valet/internal/edge/browser"
 	"github.com/joalavedra/valet/internal/edge/card"
 	"github.com/joalavedra/valet/internal/edge/egress"
+	issueredge "github.com/joalavedra/valet/internal/edge/issuer"
 	"github.com/joalavedra/valet/internal/edge/wallet"
 	mppedg "github.com/joalavedra/valet/internal/edge/wallet/mpp"
 	"github.com/joalavedra/valet/internal/grant"
@@ -2711,5 +2713,130 @@ func TestIssuerApprovalMintsCard(t *testing.T) {
 	ic, err := st.GetIssuedCardByGrant(out["grant_id"].(string))
 	if err != nil || ic.Status != "active" {
 		t.Fatalf("approve mint: %+v %v", ic, err)
+	}
+}
+
+// flakyIssuer fails Close until told otherwise, to exercise close-retry.
+type flakyIssuer struct {
+	failClose int32
+}
+
+func (f *flakyIssuer) Name() string { return "flaky" }
+func (f *flakyIssuer) Capabilities() issueredge.Caps {
+	return issueredge.Caps{MerchantLock: true, Cap: true, SingleUse: true, Reveal: true}
+}
+func (f *flakyIssuer) Issue(_ context.Context, spec issueredge.CardSpec) (issueredge.Card, error) {
+	return issueredge.Card{ID: "flaky_1", Brand: "visa", Last4: "4242", ExpMonth: "01", ExpYear: "2030", Holder: "T", Status: "active"}, nil
+}
+func (f *flakyIssuer) Reveal(_ context.Context, cardID string) (issueredge.Fields, error) {
+	return issueredge.Fields{Number: "4111111111111111", CVC: "123"}, nil
+}
+func (f *flakyIssuer) Close(_ context.Context, cardID string) error {
+	if atomic.AddInt32(&f.failClose, -1) >= 0 {
+		return fmt.Errorf("close unavailable")
+	}
+	return nil
+}
+
+func addIssuerCredDriver(t *testing.T, srv *Server, st *store.SQLite, label, driver string) string {
+	t.Helper()
+	pt, _ := json.Marshal(map[string]string{})
+	ct, _ := crypto.Encrypt(srv.dek, pt)
+	h := "issuer://" + label
+	if err := st.AddCredential(&store.Credential{Handle: h, Type: "issuer", Label: label, Metadata: `{"driver":"` + driver + `"}`, Ciphertext: ct}); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+func TestIssuerPaySerializesLastUse(t *testing.T) {
+	srv, st, tok := testServer(t)
+	h := addIssuerCred(t, srv, st, "personal")
+	var calls int32
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		fmt.Fprint(w, `{"charged":true}`)
+	}))
+	defer upstream.Close()
+	srv.SetCardProvider(&fakeProvider{upstream: upstream})
+	host := strings.Split(upstream.Listener.Addr().String(), ":")[0]
+	gtok, _ := issuerGrant(t, srv, tok, h,
+		map[string]any{"spend": map[string]any{"merchants": []string{host}, "per_tx": 500}},
+		map[string]any{"max_uses": 1})
+	var wg sync.WaitGroup
+	codes := make([]int, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec, req := payReq(t, tok, map[string]any{
+				"grant_token": gtok, "url": upstream.URL + "/charge", "method": "POST",
+				"body": `{"pan":"{{card.number}}"}`, "amount": 50, "currency": "USD",
+			})
+			srv.ServeHTTP(rec, req)
+			codes[i] = rec.Code
+		}(i)
+	}
+	wg.Wait()
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("upstream saw %d calls, want exactly 1", got)
+	}
+	ok := 0
+	for _, c := range codes {
+		if c == 200 {
+			ok++
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("codes %v — want exactly one success", codes)
+	}
+}
+
+func TestIssuerCloseRetryAfterDriverFailure(t *testing.T) {
+	flaky := &flakyIssuer{failClose: 1}
+	issueredge.Register("flaky", flaky)
+	srv, st, tok := testServer(t)
+	h := addIssuerCredDriver(t, srv, st, "personal", "flaky")
+	_, gid := issuerGrant(t, srv, tok, h, map[string]any{"spend": map[string]any{"merchants": []string{"*"}}}, nil)
+	// Driver fails → row stays active.
+	srv.closeIssuedCard(gid, "test")
+	ic, _ := st.GetIssuedCardByGrant(gid)
+	if ic.Status != "active" {
+		t.Fatalf("row must stay active on driver failure, got %+v", ic)
+	}
+	// Driver recovered → sweep closes it.
+	srv.sweepIssuedCards() // grant still live — nothing to close on policy grounds
+	srv.closeIssuedCard(gid, "test")
+	ic, _ = st.GetIssuedCardByGrant(gid)
+	if ic.Status != "closed" {
+		t.Fatalf("want closed after retry, got %+v", ic)
+	}
+}
+
+func TestIssuerGrantUnscopedRejected(t *testing.T) {
+	srv, st, tok := testServer(t)
+	h := addIssuerCred(t, srv, st, "personal")
+	code, out := doJSON(t, srv, "POST", "/v1/grants", tok,
+		map[string]any{"handle": h, "policy": map[string]any{"spend": map[string]any{"per_tx": 100}}})
+	if code != 400 || out["error"] != "issuer grant must restrict merchants" {
+		t.Fatalf("got %d %v", code, out)
+	}
+	if n, _ := st.ListIssuedCards(false); len(n) != 0 {
+		t.Fatalf("card minted for unscoped grant: %v", n)
+	}
+}
+
+func TestIssuerGrantTypeMismatchRejected(t *testing.T) {
+	srv, st, tok := testServer(t)
+	// A card-typed credential under an issuer:// handle must not mint.
+	pt, _ := json.Marshal(map[string]string{"number": "x"})
+	ct, _ := crypto.Encrypt(srv.dek, pt)
+	if err := st.AddCredential(&store.Credential{Handle: "issuer://sneaky", Type: "card", Label: "sneaky", Metadata: "{}", Ciphertext: ct}); err != nil {
+		t.Fatal(err)
+	}
+	code, out := doJSON(t, srv, "POST", "/v1/grants", tok,
+		map[string]any{"handle": "issuer://sneaky", "policy": map[string]any{"spend": map[string]any{"merchants": []string{"*"}}}})
+	if code != 400 || out["error"] != "handle_type_mismatch" {
+		t.Fatalf("got %d %v", code, out)
 	}
 }
