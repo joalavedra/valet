@@ -1441,11 +1441,13 @@ func (s *Server) cardPay(w http.ResponseWriter, r *http.Request, a *store.Agent)
 		// fresh snapshot so two parallel last-use calls can't both pass.
 		unlock := s.lockGrant(g.ID)
 		defer unlock()
-		if g, err = s.st.GetGrant(g.ID); err != nil {
+		fresh, gerr := s.st.GetGrant(g.ID)
+		if gerr != nil || fresh == nil {
 			s.auditDeny(a.ID, g.Handle, "card", "", "grant_revoked")
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "grant revoked"})
 			return
 		}
+		g = fresh
 	}
 	u, err := url.Parse(req.URL)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
